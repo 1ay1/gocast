@@ -14,9 +14,12 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags="-s -w -X main.version=1.0.0" \
+# Build the binary with version info from VERSION file
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+RUN VERSION=$(cat VERSION) && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.gitCommit=${GIT_COMMIT} -X main.buildDate=${BUILD_DATE}" \
     -o gocast \
     ./cmd/gocast
 

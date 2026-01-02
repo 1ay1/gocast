@@ -2,10 +2,16 @@
 # Modern Icecast replacement written in Go
 
 BINARY_NAME=gocast
-VERSION=1.0.0
+VERSION=$(shell cat VERSION)
+GIT_COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 BUILD_DIR=build
 GO=go
-GOFLAGS=-ldflags="-s -w -X main.version=$(VERSION)"
+LDFLAGS=-s -w \
+	-X main.version=$(VERSION) \
+	-X main.gitCommit=$(GIT_COMMIT) \
+	-X main.buildDate=$(BUILD_DATE)
+GOFLAGS=-ldflags="$(LDFLAGS)"
 
 # Default target
 .PHONY: all

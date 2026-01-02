@@ -15,10 +15,14 @@ import (
 	"github.com/gocast/gocast/internal/server"
 )
 
-const (
-	version   = "1.0.0"
-	userAgent = "GoCast/" + version
+// Version information - injected at build time via ldflags
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+	buildDate = "unknown"
 )
+
+var userAgent = "GoCast/" + version
 
 func main() {
 	// Parse command line flags
@@ -35,8 +39,10 @@ func main() {
 	}
 
 	if *showVersion {
-		fmt.Printf("GoCast %s - A modern Icecast replacement\n", version)
-		fmt.Println("https://github.com/gocast/gocast")
+		fmt.Printf("GoCast %s\n", version)
+		fmt.Printf("  Git Commit: %s\n", gitCommit)
+		fmt.Printf("  Build Date: %s\n", buildDate)
+		fmt.Println("  https://github.com/gocast/gocast")
 		os.Exit(0)
 	}
 

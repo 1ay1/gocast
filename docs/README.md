@@ -11,6 +11,7 @@ Welcome to the GoCast documentation. GoCast is a modern, drop-in replacement for
 - [Admin API](admin-api.md) - Administration endpoints and management
 - [Architecture](architecture.md) - Internal architecture and design
 - [VIBE Config Format](vibe.md) - VIBE configuration format documentation
+- [Roadmap](roadmap.md) - Planned features and implementation status
 
 ## Overview
 

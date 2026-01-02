@@ -1,0 +1,46 @@
+# Binary
+/gocast
+/gocast.exe
+
+# Build directory
+/build/
+
+# Coverage reports
+coverage.out
+coverage.html
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local config overrides
+*.local.vibe
+*.local.json
+
+# Recordings (if stored locally)
+/recordings/
+
+# SSL certificates (should not be committed)
+*.pem
+*.key
+*.crt
+*.csr
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Temporary files
+tmp/
+*.tmp
