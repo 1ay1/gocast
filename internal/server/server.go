@@ -275,9 +275,15 @@ func (s *Server) createRouter() http.Handler {
 			return
 		}
 
-		// Admin static assets (CSS, JS)
-		if strings.HasPrefix(path, "/admin/css/") || strings.HasPrefix(path, "/admin/js/") {
+		// Admin static assets (CSS, JS, including nested paths like js/pages/)
+		if strings.HasPrefix(path, "/admin/css/") || strings.HasPrefix(path, "/admin/js/") || strings.HasPrefix(path, "/admin/pages/") {
 			s.serveAdminStatic(w, r)
+			return
+		}
+
+		// Token generation endpoint (requires basic auth) - must be before general /admin/ handler
+		if path == "/admin/token" {
+			s.handleAdminToken(w, r)
 			return
 		}
 
@@ -296,12 +302,6 @@ func (s *Server) createRouter() http.Handler {
 		// Token-authenticated SSE events endpoint
 		if path == "/events" {
 			s.handleTokenEvents(w, r)
-			return
-		}
-
-		// Token generation endpoint (requires basic auth)
-		if path == "/admin/token" {
-			s.handleAdminToken(w, r)
 			return
 		}
 
@@ -652,10 +652,21 @@ func (s *Server) serveAdminStatic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set content type based on file extension
-	if strings.HasSuffix(filePath, ".css") {
+	switch {
+	case strings.HasSuffix(filePath, ".css"):
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	} else if strings.HasSuffix(filePath, ".js") {
+	case strings.HasSuffix(filePath, ".js"):
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	case strings.HasSuffix(filePath, ".html"):
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	case strings.HasSuffix(filePath, ".json"):
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	case strings.HasSuffix(filePath, ".svg"):
+		w.Header().Set("Content-Type", "image/svg+xml")
+	case strings.HasSuffix(filePath, ".png"):
+		w.Header().Set("Content-Type", "image/png")
+	case strings.HasSuffix(filePath, ".ico"):
+		w.Header().Set("Content-Type", "image/x-icon")
 	}
 
 	// Enable caching for static assets

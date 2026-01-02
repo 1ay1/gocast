@@ -1,718 +1,127 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>GoCast Admin</title>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-        <link
-            href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
-            rel="stylesheet"
-        />
-        <link rel="stylesheet" href="/admin/css/admin.css" />
-    </head>
-    <body>
-        <div class="bg-gradient"></div>
-
-        <!-- Header -->
-        <header class="header">
-            <div class="header-content">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GoCast Admin</title>
+    <link rel="stylesheet" href="/admin/css/main.css">
+    <link rel="stylesheet" href="/admin/css/components.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
                 <div class="logo">
-                    <svg
-                        class="logo-svg"
-                        viewBox="0 0 200 50"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
+                    <svg class="logo-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="24" cy="24" r="22" stroke="url(#logoGradient)" stroke-width="3" fill="none"/>
+                        <polygon points="20,14 20,34 36,24" fill="url(#logoGradient)"/>
                         <defs>
-                            <linearGradient
-                                id="logoGrad"
-                                x1="0%"
-                                y1="0%"
-                                x2="100%"
-                                y2="100%"
-                            >
-                                <stop offset="0%" stop-color="#00D4FF" />
-                                <stop offset="100%" stop-color="#00ADD8" />
+                            <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#00d4ff"/>
+                                <stop offset="100%" stop-color="#7c3aed"/>
                             </linearGradient>
                         </defs>
-                        <circle
-                            cx="20"
-                            cy="25"
-                            r="18"
-                            fill="none"
-                            stroke="url(#logoGrad)"
-                            stroke-width="2"
-                        />
-                        <g transform="translate(20, 25)">
-                            <polygon
-                                points="-3,10 3,10 5,-5 -5,-5"
-                                fill="url(#logoGrad)"
-                            />
-                            <circle cx="0" cy="-8" r="3" fill="#00D4FF" />
-                            <path
-                                d="M-8,-3 Q-12,-10 -8,-17"
-                                fill="none"
-                                stroke="#00D4FF"
-                                stroke-width="1.5"
-                                stroke-linecap="round"
-                                opacity="0.8"
-                            />
-                            <path
-                                d="M8,-3 Q12,-10 8,-17"
-                                fill="none"
-                                stroke="#00D4FF"
-                                stroke-width="1.5"
-                                stroke-linecap="round"
-                                opacity="0.8"
-                            />
-                        </g>
-                        <text
-                            x="50"
-                            y="32"
-                            font-family="'JetBrains Mono', monospace"
-                            font-size="24"
-                            font-weight="700"
-                            fill="#00ADD8"
-                        >
-                            GoCast
-                        </text>
                     </svg>
+                    <span class="logo-text">GoCast</span>
                 </div>
-                <div class="header-status">
-                    <div class="status-badge">
-                        <div class="status-dot" id="serverStatus"></div>
-                        <span id="serverStatusText">Connecting...</span>
+                <div class="server-status" id="serverStatus">
+                    <span class="status-dot offline"></span>
+                    <span class="status-text">Connecting...</span>
+                </div>
+            </div>
+
+            <nav class="nav">
+                <a href="#dashboard" class="nav-item active" data-page="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span class="nav-label">Dashboard</span>
+                </a>
+                <a href="#streams" class="nav-item" data-page="streams">
+                    <span class="nav-icon">📡</span>
+                    <span class="nav-label">Streams</span>
+                </a>
+                <a href="#mounts" class="nav-item" data-page="mounts">
+                    <span class="nav-icon">📻</span>
+                    <span class="nav-label">Mount Points</span>
+                </a>
+                <a href="#listeners" class="nav-item" data-page="listeners">
+                    <span class="nav-icon">👥</span>
+                    <span class="nav-label">Listeners</span>
+                </a>
+                <a href="#settings" class="nav-item" data-page="settings">
+                    <span class="nav-icon">⚙️</span>
+                    <span class="nav-label">Settings</span>
+                </a>
+                <a href="#logs" class="nav-item" data-page="logs">
+                    <span class="nav-icon">📋</span>
+                    <span class="nav-label">Logs</span>
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="server-info">
+                    <div class="info-row">
+                        <span class="info-label">Uptime</span>
+                        <span class="info-value" id="uptime">--:--:--</span>
                     </div>
-                    <div class="status-badge">
-                        <span>⏱️</span>
-                        <span id="uptime">00:00:00</span>
+                    <div class="info-row">
+                        <span class="info-label">Version</span>
+                        <span class="info-value" id="version">--</span>
                     </div>
                 </div>
             </div>
-        </header>
-
-        <!-- Navigation Tabs -->
-        <nav class="nav-tabs">
-            <button class="nav-tab active" data-tab="dashboard">
-                📊 Dashboard
-            </button>
-            <button class="nav-tab" data-tab="mounts">📻 Mounts</button>
-            <button class="nav-tab" data-tab="settings">⚙️ Settings</button>
-            <button class="nav-tab" data-tab="logs">📋 Logs</button>
-        </nav>
+        </aside>
 
         <!-- Main Content -->
         <main class="main">
-            <!-- Dashboard Tab -->
-            <div class="tab-content active" id="tab-dashboard">
-                <!-- Stats Grid -->
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-icon">👥</div>
-                        <div class="stat-label">Total Listeners</div>
-                        <div class="stat-value" id="totalListeners">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">📡</div>
-                        <div class="stat-label">Active Mounts</div>
-                        <div class="stat-value" id="activeMounts">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">📊</div>
-                        <div class="stat-label">Peak Listeners</div>
-                        <div class="stat-value" id="peakListeners">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">⚡</div>
-                        <div class="stat-label">Bandwidth (KB/s)</div>
-                        <div class="stat-value" id="bandwidth">0</div>
-                    </div>
-                </div>
-
-                <!-- Content Grid -->
-                <div class="content-grid">
-                    <!-- Mounts Panel -->
-                    <div class="panel">
-                        <div class="panel-header">
-                            <h2 class="panel-title">
-                                <span>📻</span> Active Streams
-                            </h2>
-                        </div>
-                        <div class="panel-body" id="mountsContainer">
-                            <div class="mount-card">
-                                <p
-                                    style="
-                                        text-align: center;
-                                        color: var(--text-muted);
-                                        padding: 2rem;
-                                    "
-                                >
-                                    Loading...
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Activity Panel -->
-                    <div class="panel">
-                        <div class="panel-header">
-                            <h2 class="panel-title">
-                                <span>📋</span> Activity
-                            </h2>
-                        </div>
-                        <div class="panel-body">
-                            <div class="log-container" id="activityLog">
-                                <div class="log-entry">
-                                    <span class="log-time">--:--:--</span>
-                                    <span>Waiting for events...</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Mounts Tab -->
-            <div class="tab-content" id="tab-mounts">
-                <div
-                    class="panel-header"
-                    style="
-                        background: var(--bg-card);
-                        border-radius: 16px 16px 0 0;
-                        border: 1px solid var(--border-color);
-                        border-bottom: none;
-                    "
-                >
-                    <h2 class="panel-title">
-                        <span>📻</span> Mount Configuration
-                    </h2>
-                    <button
-                        class="btn btn-primary"
-                        onclick="showAddMountModal()"
-                    >
-                        ➕ Add Mount
+            <header class="header">
+                <h1 class="page-title" id="pageTitle">Dashboard</h1>
+                <div class="header-actions">
+                    <button class="btn btn-icon" id="refreshBtn" title="Refresh">
+                        <span>🔄</span>
                     </button>
-                </div>
-                <div
-                    class="panel-body"
-                    style="
-                        background: var(--bg-card);
-                        border-radius: 0 0 16px 16px;
-                        border: 1px solid var(--border-color);
-                        border-top: none;
-                    "
-                >
-                    <div id="mountsList" class="mount-list">
-                        <p
-                            style="
-                                text-align: center;
-                                color: var(--text-muted);
-                                padding: 2rem;
-                            "
-                        >
-                            Loading mounts...
-                        </p>
+                    <div class="connection-indicator" id="connectionIndicator">
+                        <span class="pulse"></span>
+                        <span class="label">Live</span>
                     </div>
                 </div>
-            </div>
+            </header>
 
-            <!-- Settings Tab -->
-            <div class="tab-content" id="tab-settings">
-                <div id="settingsAlert"></div>
-
-                <!-- Server Settings -->
-                <div class="settings-section">
-                    <div class="settings-header">
-                        <h3 class="settings-title">🖥️ Server Settings</h3>
-                    </div>
-                    <div class="settings-body">
-                        <div class="form-grid">
-                            <div class="form-group">
-                                <label class="form-label">Hostname</label>
-                                <input
-                                    type="text"
-                                    class="form-input"
-                                    id="cfg-hostname"
-                                    placeholder="localhost"
-                                />
-                                <p class="form-help">
-                                    Server hostname for URLs and headers
-                                </p>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Location</label>
-                                <input
-                                    type="text"
-                                    class="form-input"
-                                    id="cfg-location"
-                                    placeholder="Earth"
-                                />
-                                <p class="form-help">
-                                    Server location description
-                                </p>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Server ID</label>
-                                <input
-                                    type="text"
-                                    class="form-input"
-                                    id="cfg-server-id"
-                                    placeholder="GoCast"
-                                />
-                                <p class="form-help">
-                                    Server identifier in responses
-                                </p>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Port</label>
-                                <input
-                                    type="number"
-                                    class="form-input"
-                                    id="cfg-port"
-                                    placeholder="8000"
-                                    disabled
-                                />
-                                <p class="form-help">
-                                    Requires restart to change
-                                </p>
-                            </div>
-                        </div>
-                        <div class="form-actions">
-                            <button
-                                class="btn btn-primary"
-                                onclick="saveServerSettings()"
-                            >
-                                💾 Save Server Settings
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Limits Settings -->
-                <div class="settings-section">
-                    <div class="settings-header">
-                        <h3 class="settings-title">📊 Resource Limits</h3>
-                    </div>
-                    <div class="settings-body">
-                        <div class="form-grid">
-                            <div class="form-group">
-                                <label class="form-label">Max Clients</label>
-                                <input
-                                    type="number"
-                                    class="form-input"
-                                    id="cfg-max-clients"
-                                    placeholder="100"
-                                />
-                                <p class="form-help">
-                                    Maximum total connected clients
-                                </p>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Max Sources</label>
-                                <input
-                                    type="number"
-                                    class="form-input"
-                                    id="cfg-max-sources"
-                                    placeholder="10"
-                                />
-                                <p class="form-help">
-                                    Maximum source connections
-                                </p>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label"
-                                    >Max Listeners Per Mount</label
-                                >
-                                <input
-                                    type="number"
-                                    class="form-input"
-                                    id="cfg-max-listeners"
-                                    placeholder="100"
-                                />
-                                <p class="form-help">
-                                    Default listener limit per mount
-                                </p>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label"
-                                    >Queue Size (bytes)</label
-                                >
-                                <input
-                                    type="number"
-                                    class="form-input"
-                                    id="cfg-queue-size"
-                                    placeholder="131072"
-                                />
-                                <p class="form-help">
-                                    Buffer size for each listener
-                                </p>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label"
-                                    >Burst Size (bytes)</label
-                                >
-                                <input
-                                    type="number"
-                                    class="form-input"
-                                    id="cfg-burst-size"
-                                    placeholder="2048"
-                                />
-                                <p class="form-help">
-                                    Initial burst data for new listeners
-                                </p>
-                            </div>
-                        </div>
-                        <div class="form-actions">
-                            <button
-                                class="btn btn-primary"
-                                onclick="saveLimitsSettings()"
-                            >
-                                💾 Save Limits
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Auth Settings -->
-                <div class="settings-section">
-                    <div class="settings-header">
-                        <h3 class="settings-title">🔐 Authentication</h3>
-                    </div>
-                    <div class="settings-body">
-                        <div class="form-grid">
-                            <div class="form-group">
-                                <label class="form-label"
-                                    >Source Password</label
-                                >
-                                <input
-                                    type="password"
-                                    class="form-input"
-                                    id="cfg-source-password"
-                                    placeholder="••••••••"
-                                />
-                                <p class="form-help">
-                                    Default password for source connections
-                                </p>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Admin Username</label>
-                                <input
-                                    type="text"
-                                    class="form-input"
-                                    id="cfg-admin-user"
-                                    placeholder="admin"
-                                />
-                                <p class="form-help">Admin panel username</p>
-                            </div>
-                            <div class="form-group full-width">
-                                <label class="form-label"
-                                    >New Admin Password</label
-                                >
-                                <input
-                                    type="password"
-                                    class="form-input"
-                                    id="cfg-admin-password"
-                                    placeholder="Leave blank to keep current"
-                                />
-                                <p class="form-help">
-                                    ⚠️ Changing this will require re-login
-                                </p>
-                            </div>
-                        </div>
-                        <div class="form-actions">
-                            <button
-                                class="btn btn-primary"
-                                onclick="saveAuthSettings()"
-                            >
-                                💾 Save Authentication
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Danger Zone -->
-                <div
-                    class="settings-section"
-                    style="border-color: rgba(239, 68, 68, 0.3)"
-                >
-                    <div class="settings-header">
-                        <h3
-                            class="settings-title"
-                            style="color: var(--accent-red)"
-                        >
-                            ⚠️ Danger Zone
-                        </h3>
-                    </div>
-                    <div class="settings-body">
-                        <p
-                            style="
-                                color: var(--text-muted);
-                                margin-bottom: 1rem;
-                            "
-                        >
-                            Reset all configuration to defaults. This will
-                            remove all runtime changes made via the admin panel.
-                        </p>
-                        <div
-                            class="form-actions"
-                            style="border: none; margin: 0; padding: 0"
-                        >
-                            <button
-                                class="btn btn-danger"
-                                onclick="resetConfig()"
-                            >
-                                🔄 Reset to Defaults
-                            </button>
-                            <button
-                                class="btn btn-secondary"
-                                onclick="exportConfig()"
-                            >
-                                📥 Export Config
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Logs Tab -->
-            <div class="tab-content" id="tab-logs">
-                <div class="panel">
-                    <div class="panel-header">
-                        <h2 class="panel-title">
-                            <span>📋</span> Full Activity Log
-                        </h2>
-                        <button class="btn btn-secondary" onclick="clearLogs()">
-                            🗑️ Clear
-                        </button>
-                    </div>
-                    <div class="panel-body">
-                        <div
-                            class="log-container"
-                            id="fullActivityLog"
-                            style="max-height: 600px"
-                        >
-                            <div class="log-entry">
-                                <span class="log-time">--:--:--</span>
-                                <span>No activity yet</span>
-                            </div>
-                        </div>
-                    </div>
+            <div class="content" id="content">
+                <!-- Pages load here dynamically -->
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading...</p>
                 </div>
             </div>
         </main>
+    </div>
 
-        <!-- Add/Edit Mount Modal -->
-        <div class="modal-overlay" id="mountModal">
-            <div class="modal">
-                <div class="modal-header">
-                    <h3 class="modal-title" id="mountModalTitle">Add Mount</h3>
-                    <button class="modal-close" onclick="closeMountModal()">
-                        &times;
-                    </button>
-                </div>
-                <div class="modal-body">
-                    <input type="hidden" id="mount-edit-mode" value="create" />
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label class="form-label">Mount Path</label>
-                            <input
-                                type="text"
-                                class="form-input"
-                                id="mount-path"
-                                placeholder="/live"
-                            />
-                            <p class="form-help">
-                                URL path for this mount (e.g., /live)
-                            </p>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Stream Name</label>
-                            <input
-                                type="text"
-                                class="form-input"
-                                id="mount-name"
-                                placeholder="My Stream"
-                            />
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Password</label>
-                            <input
-                                type="password"
-                                class="form-input"
-                                id="mount-password"
-                                placeholder="Source password"
-                            />
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Max Listeners</label>
-                            <input
-                                type="number"
-                                class="form-input"
-                                id="mount-max-listeners"
-                                placeholder="100"
-                            />
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Bitrate (kbps)</label>
-                            <input
-                                type="number"
-                                class="form-input"
-                                id="mount-bitrate"
-                                placeholder="128"
-                            />
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Content Type</label>
-                            <select class="form-select" id="mount-type">
-                                <option value="audio/mpeg">
-                                    audio/mpeg (MP3)
-                                </option>
-                                <option value="audio/ogg">
-                                    audio/ogg (Ogg Vorbis)
-                                </option>
-                                <option value="audio/aac">
-                                    audio/aac (AAC)
-                                </option>
-                                <option value="audio/opus">
-                                    audio/opus (Opus)
-                                </option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Genre</label>
-                            <input
-                                type="text"
-                                class="form-input"
-                                id="mount-genre"
-                                placeholder="Various"
-                            />
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">URL</label>
-                            <input
-                                type="text"
-                                class="form-input"
-                                id="mount-url"
-                                placeholder="https://example.com"
-                            />
-                        </div>
-                        <div class="form-group full-width">
-                            <label class="form-label">Description</label>
-                            <input
-                                type="text"
-                                class="form-input"
-                                id="mount-description"
-                                placeholder="Stream description"
-                            />
-                        </div>
-                        <div class="form-group">
-                            <div class="form-checkbox">
-                                <input
-                                    type="checkbox"
-                                    id="mount-public"
-                                    checked
-                                />
-                                <label for="mount-public"
-                                    >Public (list in directory)</label
-                                >
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <div class="form-checkbox">
-                                <input type="checkbox" id="mount-hidden" />
-                                <label for="mount-hidden"
-                                    >Hidden (exclude from status)</label
-                                >
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button
-                        class="btn btn-secondary"
-                        onclick="closeMountModal()"
-                    >
-                        Cancel
-                    </button>
-                    <button class="btn btn-primary" onclick="saveMount()">
-                        💾 Save Mount
-                    </button>
-                </div>
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Modal Container -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal" id="modal">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modalTitle">Modal</h3>
+                <button class="modal-close" id="modalClose">&times;</button>
             </div>
+            <div class="modal-body" id="modalBody"></div>
+            <div class="modal-footer" id="modalFooter"></div>
         </div>
+    </div>
 
-        <!-- Toast Container -->
-        <div class="toast-container" id="toastContainer"></div>
-
-        <!-- Footer -->
-        <footer class="footer">
-            <div class="footer-content">
-                <div class="footer-logo">
-                    <svg viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
-                        <defs>
-                            <linearGradient
-                                id="footerGrad"
-                                x1="0%"
-                                y1="0%"
-                                x2="100%"
-                                y2="100%"
-                            >
-                                <stop offset="0%" stop-color="#00D4FF" />
-                                <stop offset="100%" stop-color="#00ADD8" />
-                            </linearGradient>
-                        </defs>
-                        <circle
-                            cx="20"
-                            cy="20"
-                            r="18"
-                            fill="none"
-                            stroke="url(#footerGrad)"
-                            stroke-width="1.5"
-                        />
-                        <g transform="translate(20, 20)">
-                            <polygon
-                                points="-2.5,8 2.5,8 4,-4 -4,-4"
-                                fill="url(#footerGrad)"
-                            />
-                            <circle cx="0" cy="-6" r="2.5" fill="#00D4FF" />
-                        </g>
-                    </svg>
-                    <span class="footer-text">GoCast Streaming Server</span>
-                </div>
-                <div class="footer-links">
-                    <a
-                        href="https://github.com/AyushGupta45/gocast"
-                        class="footer-link"
-                        target="_blank"
-                        >GitHub</a
-                    >
-                    <a href="/status" class="footer-link" target="_blank"
-                        >Public Status</a
-                    >
-                    <a
-                        href="/status?format=json"
-                        class="footer-link"
-                        target="_blank"
-                        >API</a
-                    >
-                    <a
-                        href="https://github.com/AyushGupta45/gocast/issues"
-                        class="footer-link"
-                        target="_blank"
-                        >Report Issue</a
-                    >
-                    <a
-                        href="https://github.com/AyushGupta45/gocast#readme"
-                        class="footer-link"
-                        target="_blank"
-                        >Documentation</a
-                    >
-                </div>
-                <div class="footer-version" id="serverVersion">v1.0.0</div>
-            </div>
-        </footer>
-
-        <script src="/admin/js/admin.js"></script>
-    </body>
+    <!-- Core Scripts -->
+    <script src="/admin/js/api.js"></script>
+    <script src="/admin/js/state.js"></script>
+    <script src="/admin/js/ui.js"></script>
+    <script src="/admin/js/pages/dashboard.js"></script>
+    <script src="/admin/js/pages/streams.js"></script>
+    <script src="/admin/js/pages/mounts.js"></script>
+    <script src="/admin/js/pages/listeners.js"></script>
+    <script src="/admin/js/pages/settings.js"></script>
+    <script src="/admin/js/pages/logs.js"></script>
+    <script src="/admin/js/app.js"></script>
+</body>
 </html>
