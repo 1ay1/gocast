@@ -46,3 +46,8 @@ Thumbs.db
 tmp/
 *.tmp
 gocast
+-e 
+# Binaries
+gocast-test
+*.exe
+
