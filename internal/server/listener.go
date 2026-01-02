@@ -14,6 +14,18 @@ import (
 	"github.com/gocast/gocast/internal/stream"
 )
 
+// Low latency constants
+const (
+	// Smaller chunk size for lower latency (was 8192)
+	maxChunkSize = 2048
+
+	// Faster poll interval when no data available
+	pollInterval = 5 * time.Millisecond
+
+	// ICY metadata interval
+	icyMetadataInterval = 16000
+)
+
 // ListenerHandler handles listener connections
 type ListenerHandler struct {
 	mountManager *stream.MountManager
@@ -90,7 +102,7 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	wantsMetadata := r.Header.Get("Icy-MetaData") == "1"
 	metadataInterval := 0
 	if wantsMetadata {
-		metadataInterval = 16000 // Standard interval
+		metadataInterval = icyMetadataInterval
 	}
 
 	h.logger.Printf("Listener connected: %s from %s (UA: %s, metadata: %v)",
@@ -115,7 +127,7 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			mountPath, clientIP, listener.BytesSent)
 	}()
 
-	// Stream data to listener
+	// Stream data to listener with optimized low-latency delivery
 	h.streamToListener(w, listener, mount, metadataInterval)
 }
 
@@ -158,34 +170,76 @@ func (h *ListenerHandler) setResponseHeaders(w http.ResponseWriter, mount *strea
 }
 
 // streamToListener streams audio data to the listener
+// Optimized for low latency and synchronized playback
 func (h *ListenerHandler) streamToListener(w http.ResponseWriter, listener *stream.Listener, mount *stream.Mount, metadataInterval int) {
 	// Get flusher for immediate writes
 	flusher, hasFlusher := w.(http.Flusher)
 
 	buffer := mount.Buffer()
-	readPos := buffer.WritePos() - int64(buffer.BurstSize())
-	if readPos < 0 {
-		readPos = 0
+
+	// OPTIMIZATION: Start at live position instead of burst position
+	// This dramatically reduces initial latency
+	readPos := buffer.GetLivePosition()
+
+	// Send minimal burst data immediately for quick start
+	burstData := buffer.GetBurst()
+	if len(burstData) > 0 {
+		// Only send last 4KB of burst for fast start (was 64KB)
+		if len(burstData) > 4096 {
+			burstData = burstData[len(burstData)-4096:]
+		}
+
+		var err error
+		if metadataInterval > 0 {
+			var metaByteCount int
+			var lastMetadata string
+			err = h.writeWithMetadata(w, burstData, mount, &metaByteCount, &lastMetadata, metadataInterval)
+		} else {
+			_, err = w.Write(burstData)
+		}
+
+		if err != nil {
+			return
+		}
+
+		listener.BytesSent += int64(len(burstData))
+
+		if hasFlusher {
+			flusher.Flush()
+		}
+
+		// Update read position to after burst
+		readPos = buffer.WritePos()
 	}
 
 	// Track metadata for ICY injection
 	var metaByteCount int
 	var lastMetadata string
 
-	// Timeout for waiting on new data
-	dataTimeout := time.NewTimer(h.config.Limits.ClientTimeout)
-	defer dataTimeout.Stop()
+	// Use buffer's notify channel for efficient waiting
+	notifyChan := buffer.NotifyChan()
+
+	// Timeout for connection health
+	timeoutDuration := h.config.Limits.ClientTimeout
+	if timeoutDuration == 0 {
+		timeoutDuration = 30 * time.Second
+	}
+	lastDataTime := time.Now()
+
+	// Poll ticker for when notify doesn't trigger
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-listener.Done():
 			return
-		case <-mount.Notify():
-			// New data available
-		case <-dataTimeout.C:
-			// Timeout waiting for data
-			h.logger.Printf("Listener timeout: %s", listener.ID)
-			return
+
+		case <-notifyChan:
+			// New data available - read immediately
+
+		case <-ticker.C:
+			// Periodic check for data
 		}
 
 		// Check if source is still active
@@ -193,15 +247,21 @@ func (h *ListenerHandler) streamToListener(w http.ResponseWriter, listener *stre
 			return
 		}
 
-		// Read available data
-		data, newPos := buffer.ReadFrom(readPos, 8192)
+		// Check connection timeout
+		if time.Since(lastDataTime) > timeoutDuration {
+			h.logger.Printf("Listener timeout: %s", listener.ID)
+			return
+		}
+
+		// OPTIMIZATION: Read smaller chunks more frequently
+		// This reduces latency and keeps listeners more in sync
+		data, newPos := buffer.ReadFrom(readPos, maxChunkSize)
 		if len(data) == 0 {
-			// No new data, wait for notification
-			dataTimeout.Reset(h.config.Limits.ClientTimeout)
 			continue
 		}
 
 		readPos = newPos
+		lastDataTime = time.Now()
 
 		// Write data (with optional metadata injection)
 		var err error
@@ -218,12 +278,10 @@ func (h *ListenerHandler) streamToListener(w http.ResponseWriter, listener *stre
 		listener.BytesSent += int64(len(data))
 		listener.LastActive = time.Now()
 
+		// OPTIMIZATION: Flush immediately for low latency
 		if hasFlusher {
 			flusher.Flush()
 		}
-
-		// Reset timeout
-		dataTimeout.Reset(h.config.Limits.ClientTimeout)
 
 		// Check max listener duration
 		if mount.Config.MaxListenerDuration > 0 {

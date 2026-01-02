@@ -8,6 +8,7 @@ import (
 )
 
 // Buffer is a ring buffer for streaming audio data to multiple listeners
+// Optimized for low latency streaming with synchronized listener positions
 type Buffer struct {
 	data       []byte
 	size       int
@@ -16,48 +17,74 @@ type Buffer struct {
 	burstSize  int
 	created    time.Time
 	bytesTotal int64
+
+	// Listener synchronization
+	listeners   map[*int64]struct{} // Track listener positions
+	listenersMu sync.RWMutex
+	notifyChan  chan struct{}
+	notifyMu    sync.Mutex
 }
 
 // NewBuffer creates a new stream buffer with the specified size
+// Optimized defaults for low latency:
+// - Smaller default burst (16KB) for faster initial playback
+// - Smaller default buffer (256KB) for reduced memory and latency
 func NewBuffer(size int, burstSize int) *Buffer {
 	if size <= 0 {
-		size = 524288 // 512KB default
+		size = 262144 // 256KB default (reduced from 512KB)
 	}
 	if burstSize <= 0 {
-		burstSize = 65535 // 64KB default burst
+		burstSize = 16384 // 16KB default burst (reduced from 64KB)
 	}
 	if burstSize > size {
 		burstSize = size
 	}
 
 	return &Buffer{
-		data:      make([]byte, size),
-		size:      size,
-		writePos:  0,
-		burstSize: burstSize,
-		created:   time.Now(),
+		data:       make([]byte, size),
+		size:       size,
+		writePos:   0,
+		burstSize:  burstSize,
+		created:    time.Now(),
+		listeners:  make(map[*int64]struct{}),
+		notifyChan: make(chan struct{}, 1),
 	}
 }
 
 // Write writes data to the buffer
+// Optimized: batch copy instead of byte-by-byte
 func (b *Buffer) Write(p []byte) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	n = len(p)
 
-	// Write data to the ring buffer
-	for i := 0; i < n; i++ {
-		pos := int(b.writePos % int64(b.size))
-		b.data[pos] = p[i]
-		b.writePos++
+	// Optimized: copy in chunks instead of byte-by-byte
+	startPos := b.writePos % int64(b.size)
+
+	if int(startPos)+n <= b.size {
+		// Fast path: single copy
+		copy(b.data[startPos:], p)
+	} else {
+		// Wrap around: two copies
+		firstPart := b.size - int(startPos)
+		copy(b.data[startPos:], p[:firstPart])
+		copy(b.data[0:], p[firstPart:])
 	}
 
+	b.writePos += int64(n)
 	atomic.AddInt64(&b.bytesTotal, int64(n))
+	b.mu.Unlock()
+
+	// Non-blocking notify
+	b.notifyMu.Lock()
+	select {
+	case b.notifyChan <- struct{}{}:
+	default:
+	}
+	b.notifyMu.Unlock()
 
 	return n, nil
 }
@@ -70,6 +97,7 @@ func (b *Buffer) WritePos() int64 {
 }
 
 // GetBurst returns the most recent burst_size bytes for new listeners
+// Optimized: reduced default burst size for faster initial playback
 func (b *Buffer) GetBurst() []byte {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -86,9 +114,14 @@ func (b *Buffer) GetBurst() []byte {
 	result := make([]byte, burstBytes)
 	startPos := b.writePos - int64(burstBytes)
 
-	for i := 0; i < burstBytes; i++ {
-		pos := int((startPos + int64(i)) % int64(b.size))
-		result[i] = b.data[pos]
+	// Optimized: batch copy
+	readStart := int(startPos % int64(b.size))
+	if readStart+burstBytes <= b.size {
+		copy(result, b.data[readStart:readStart+burstBytes])
+	} else {
+		firstPart := b.size - readStart
+		copy(result[:firstPart], b.data[readStart:])
+		copy(result[firstPart:], b.data[:burstBytes-firstPart])
 	}
 
 	return result
@@ -96,6 +129,7 @@ func (b *Buffer) GetBurst() []byte {
 
 // ReadFrom reads data from the buffer starting at the given position
 // Returns the data and the new position
+// Optimized: smaller max read size for lower latency
 func (b *Buffer) ReadFrom(pos int64, maxBytes int) ([]byte, int64) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -125,12 +159,80 @@ func (b *Buffer) ReadFrom(pos int64, maxBytes int) ([]byte, int64) {
 	}
 
 	result := make([]byte, available)
-	for i := 0; i < available; i++ {
-		bufPos := int((pos + int64(i)) % int64(b.size))
-		result[i] = b.data[bufPos]
+	readStart := int(pos % int64(b.size))
+
+	// Optimized: batch copy
+	if readStart+available <= b.size {
+		copy(result, b.data[readStart:readStart+available])
+	} else {
+		firstPart := b.size - readStart
+		copy(result[:firstPart], b.data[readStart:])
+		copy(result[firstPart:], b.data[:available-firstPart])
 	}
 
 	return result, pos + int64(available)
+}
+
+// ReadFromSync reads from a synchronized position for listener sync
+// All listeners calling this will get data from approximately the same position
+func (b *Buffer) ReadFromSync(maxBytes int) ([]byte, int64) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if b.writePos == 0 {
+		return nil, 0
+	}
+
+	// Read from a position that's slightly behind write position
+	// This keeps all listeners synced to the same point
+	lagBytes := int64(b.burstSize / 2) // Half burst behind for sync
+	pos := b.writePos - lagBytes
+	if pos < 0 {
+		pos = 0
+	}
+
+	available := int(b.writePos - pos)
+	if available > maxBytes {
+		available = maxBytes
+	}
+
+	if available <= 0 {
+		return nil, b.writePos
+	}
+
+	result := make([]byte, available)
+	readStart := int(pos % int64(b.size))
+
+	if readStart+available <= b.size {
+		copy(result, b.data[readStart:readStart+available])
+	} else {
+		firstPart := b.size - readStart
+		copy(result[:firstPart], b.data[readStart:])
+		copy(result[firstPart:], b.data[:available-firstPart])
+	}
+
+	return result, pos + int64(available)
+}
+
+// GetLivePosition returns the position for a new listener to start at
+// for synchronized playback (slightly behind live edge)
+func (b *Buffer) GetLivePosition() int64 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	// Start at live edge minus small buffer for sync
+	// This is much smaller than burst for faster start
+	lagBytes := int64(4096) // 4KB behind live edge
+	pos := b.writePos - lagBytes
+	if pos < 0 {
+		pos = 0
+	}
+	return pos
+}
+
+// NotifyChan returns the notification channel for new data
+func (b *Buffer) NotifyChan() <-chan struct{} {
+	return b.notifyChan
 }
 
 // BytesTotal returns the total number of bytes written
@@ -161,4 +263,21 @@ func (b *Buffer) Reset() {
 	b.writePos = 0
 	b.bytesTotal = 0
 	b.created = time.Now()
+
+	// Reset notify channel
+	b.notifyMu.Lock()
+	select {
+	case <-b.notifyChan:
+	default:
+	}
+	b.notifyMu.Unlock()
+}
+
+// SetBurstSize allows runtime adjustment of burst size
+func (b *Buffer) SetBurstSize(size int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if size > 0 && size <= b.size {
+		b.burstSize = size
+	}
 }

@@ -138,7 +138,6 @@ type Mount struct {
 	peakListeners int32
 	mu            sync.RWMutex
 	listenerMu    sync.RWMutex
-	notify        chan struct{} // Notify channel for new data
 	fallbackMount string
 }
 
@@ -160,7 +159,6 @@ func NewMount(path string, cfg *config.MountConfig, bufferSize, burstSize int) *
 		buffer:    NewBuffer(bufferSize, cfg.BurstSize),
 		metadata:  &Metadata{ContentType: cfg.Type},
 		listeners: make(map[string]*Listener),
-		notify:    make(chan struct{}, 1),
 	}
 }
 
@@ -201,6 +199,7 @@ func (m *Mount) IsActive() bool {
 }
 
 // WriteData writes data from the source to the buffer
+// Optimized: buffer handles its own notification now
 func (m *Mount) WriteData(data []byte) (int, error) {
 	m.mu.RLock()
 	if !m.sourceActive {
@@ -215,12 +214,6 @@ func (m *Mount) WriteData(data []byte) (int, error) {
 	}
 
 	atomic.AddInt64(&m.bytesReceived, int64(n))
-
-	// Notify waiting listeners
-	select {
-	case m.notify <- struct{}{}:
-	default:
-	}
 
 	return n, nil
 }
@@ -349,8 +342,9 @@ func (m *Mount) Buffer() *Buffer {
 }
 
 // Notify returns the notification channel for new data
+// Now delegated to buffer for more efficient notification
 func (m *Mount) Notify() <-chan struct{} {
-	return m.notify
+	return m.buffer.NotifyChan()
 }
 
 // Stats returns mount statistics
