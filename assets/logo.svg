@@ -1,16 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 120">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 140">
   <defs>
     <!-- Primary gradient (Go cyan) -->
     <linearGradient id="primaryGradient" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#00D4FF"/>
       <stop offset="50%" stop-color="#00ADD8"/>
       <stop offset="100%" stop-color="#007d9c"/>
-    </linearGradient>
-
-    <!-- Text gradient -->
-    <linearGradient id="textGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#FFFFFF"/>
-      <stop offset="100%" stop-color="#E0F7FF"/>
     </linearGradient>
 
     <!-- Glow filter -->
@@ -32,62 +26,64 @@
     </filter>
   </defs>
 
-  <!-- Background circle -->
-  <circle cx="55" cy="60" r="48" fill="#0d1117" stroke="url(#primaryGradient)" stroke-width="2"/>
+  <!-- Background circle (centered) -->
+  <circle cx="200" cy="50" r="40" fill="#0d1117" stroke="url(#primaryGradient)" stroke-width="2"/>
 
-  <!-- Broadcast tower -->
-  <g transform="translate(55, 60)" filter="url(#glow)">
+  <!-- Broadcast tower (centered) -->
+  <g transform="translate(200, 50)" filter="url(#glow)">
     <!-- Tower body -->
-    <polygon points="-6,28 6,28 10,-12 -10,-12" fill="url(#primaryGradient)"/>
+    <polygon points="-5,24 5,24 8,-10 -8,-10" fill="url(#primaryGradient)"/>
     <!-- Tower top -->
-    <circle cx="0" cy="-16" r="6" fill="#00D4FF"/>
+    <circle cx="0" cy="-14" r="5" fill="#00D4FF"/>
     <!-- Tower base -->
-    <rect x="-12" y="28" width="24" height="4" rx="2" fill="url(#primaryGradient)"/>
+    <rect x="-10" y="24" width="20" height="3" rx="1.5" fill="url(#primaryGradient)"/>
   </g>
 
-  <!-- Broadcast waves (animated) -->
-  <g transform="translate(55, 44)" filter="url(#waveGlow)">
+  <!-- Broadcast waves (animated, centered) -->
+  <g transform="translate(200, 36)" filter="url(#waveGlow)">
     <!-- Wave 1 (inner) -->
-    <path d="M-14,-8 Q-20,-20 -14,-32" fill="none" stroke="#00D4FF" stroke-width="2.5" stroke-linecap="round" opacity="0.9">
+    <path d="M-12,-6 Q-17,-16 -12,-26" fill="none" stroke="#00D4FF" stroke-width="2" stroke-linecap="round" opacity="0.9">
       <animate attributeName="opacity" values="0.9;0.4;0.9" dur="1.5s" repeatCount="indefinite"/>
     </path>
-    <path d="M14,-8 Q20,-20 14,-32" fill="none" stroke="#00D4FF" stroke-width="2.5" stroke-linecap="round" opacity="0.9">
+    <path d="M12,-6 Q17,-16 12,-26" fill="none" stroke="#00D4FF" stroke-width="2" stroke-linecap="round" opacity="0.9">
       <animate attributeName="opacity" values="0.9;0.4;0.9" dur="1.5s" repeatCount="indefinite"/>
     </path>
 
     <!-- Wave 2 (middle) -->
-    <path d="M-22,-4 Q-32,-22 -22,-40" fill="none" stroke="#00ADD8" stroke-width="2" stroke-linecap="round" opacity="0.7">
+    <path d="M-18,-3 Q-26,-18 -18,-33" fill="none" stroke="#00ADD8" stroke-width="1.5" stroke-linecap="round" opacity="0.7">
       <animate attributeName="opacity" values="0.7;0.3;0.7" dur="1.5s" repeatCount="indefinite" begin="0.2s"/>
     </path>
-    <path d="M22,-4 Q32,-22 22,-40" fill="none" stroke="#00ADD8" stroke-width="2" stroke-linecap="round" opacity="0.7">
+    <path d="M18,-3 Q26,-18 18,-33" fill="none" stroke="#00ADD8" stroke-width="1.5" stroke-linecap="round" opacity="0.7">
       <animate attributeName="opacity" values="0.7;0.3;0.7" dur="1.5s" repeatCount="indefinite" begin="0.2s"/>
     </path>
 
     <!-- Wave 3 (outer) -->
-    <path d="M-30,0 Q-44,-24 -30,-48" fill="none" stroke="#007d9c" stroke-width="1.5" stroke-linecap="round" opacity="0.5">
+    <path d="M-25,0 Q-36,-20 -25,-40" fill="none" stroke="#007d9c" stroke-width="1" stroke-linecap="round" opacity="0.5">
       <animate attributeName="opacity" values="0.5;0.2;0.5" dur="1.5s" repeatCount="indefinite" begin="0.4s"/>
     </path>
-    <path d="M30,0 Q44,-24 30,-48" fill="none" stroke="#007d9c" stroke-width="1.5" stroke-linecap="round" opacity="0.5">
+    <path d="M25,0 Q36,-20 25,-40" fill="none" stroke="#007d9c" stroke-width="1" stroke-linecap="round" opacity="0.5">
       <animate attributeName="opacity" values="0.5;0.2;0.5" dur="1.5s" repeatCount="indefinite" begin="0.4s"/>
     </path>
   </g>
 
-  <!-- Brand name (monospace) -->
-  <text x="120" y="68"
+  <!-- Brand name (monospace, centered, blue) -->
+  <text x="200" y="115"
         font-family="'JetBrains Mono', 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace"
-        font-size="52"
+        font-size="36"
         font-weight="700"
-        fill="url(#textGradient)">
+        fill="#00ADD8"
+        text-anchor="middle">
     GoCast
   </text>
 
-  <!-- Tagline (monospace, aligned with brand name) -->
-  <text x="120" y="92"
+  <!-- Tagline (monospace, centered, same width as GoCast) -->
+  <text x="200" y="133"
         font-family="'JetBrains Mono', 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace"
-        font-size="12"
+        font-size="11"
         font-weight="400"
-        letter-spacing="1"
-        fill="#58a6ff">
-    Streaming Server
+        letter-spacing="5.5"
+        fill="#58a6ff"
+        text-anchor="middle">
+    STREAMING SERVER
   </text>
 </svg>
