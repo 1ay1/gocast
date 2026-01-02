@@ -26,15 +26,15 @@ type Buffer struct {
 }
 
 // NewBuffer creates a new stream buffer with the specified size
-// Optimized defaults for low latency:
-// - Smaller default burst (16KB) for faster initial playback
-// - Smaller default buffer (256KB) for reduced memory and latency
+// Ultra-low latency defaults:
+// - Tiny burst (2KB) for instant playback start
+// - Smaller buffer (128KB) for minimum latency
 func NewBuffer(size int, burstSize int) *Buffer {
 	if size <= 0 {
-		size = 262144 // 256KB default (reduced from 512KB)
+		size = 131072 // 128KB default - ~4 seconds at 256kbps
 	}
 	if burstSize <= 0 {
-		burstSize = 16384 // 16KB default burst (reduced from 64KB)
+		burstSize = 2048 // 2KB burst - ~50ms at 320kbps for instant start
 	}
 	if burstSize > size {
 		burstSize = size
@@ -96,8 +96,8 @@ func (b *Buffer) WritePos() int64 {
 	return b.writePos
 }
 
-// GetBurst returns the most recent burst_size bytes for new listeners
-// Optimized: reduced default burst size for faster initial playback
+// GetBurst returns minimal burst data for instant listener start
+// Ultra-low latency: only returns tiny amount to prime player buffer
 func (b *Buffer) GetBurst() []byte {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -214,15 +214,15 @@ func (b *Buffer) ReadFromSync(maxBytes int) ([]byte, int64) {
 	return result, pos + int64(available)
 }
 
-// GetLivePosition returns the position for a new listener to start at
-// for synchronized playback (slightly behind live edge)
+// GetLivePosition returns position at the live edge for instant playback
+// Ultra-low latency: start as close to live as possible
 func (b *Buffer) GetLivePosition() int64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	// Start at live edge minus small buffer for sync
-	// This is much smaller than burst for faster start
-	lagBytes := int64(4096) // 4KB behind live edge
+	// Start at live edge minus tiny buffer (512 bytes = ~12ms at 320kbps)
+	// This is the minimum needed to avoid buffer underrun
+	lagBytes := int64(512)
 	pos := b.writePos - lagBytes
 	if pos < 0 {
 		pos = 0

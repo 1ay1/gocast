@@ -113,11 +113,11 @@ func DefaultConfig() *Config {
 			MaxClients:           100,
 			MaxSources:           10,
 			MaxListenersPerMount: 100,
-			QueueSize:            262144, // 256KB (reduced for lower latency)
+			QueueSize:            131072, // 128KB - ~4sec at 256kbps, ultra-low latency
 			ClientTimeout:        30 * time.Second,
-			HeaderTimeout:        15 * time.Second,
-			SourceTimeout:        10 * time.Second,
-			BurstSize:            16384, // 16KB (reduced for faster start)
+			HeaderTimeout:        5 * time.Second, // Faster header timeout
+			SourceTimeout:        5 * time.Second, // Faster source timeout
+			BurstSize:            2048,            // 2KB burst - ~50ms at 320kbps for instant start
 		},
 		Auth: AuthConfig{
 			SourcePassword: "hackme",

@@ -1,4 +1,5 @@
 // Package server handles HTTP server and listener connections
+// Ultra-low-latency implementation for instant listener connection
 package server
 
 import (
@@ -14,13 +15,16 @@ import (
 	"github.com/gocast/gocast/internal/stream"
 )
 
-// Low latency constants
+// Ultra-low latency constants
 const (
-	// Smaller chunk size for lower latency (was 8192)
-	maxChunkSize = 2048
+	// Tiny chunks for minimum latency
+	chunkSize = 1024 // 1KB = ~25ms at 320kbps
 
-	// Faster poll interval when no data available
-	pollInterval = 5 * time.Millisecond
+	// Zero burst - start at live edge immediately
+	maxBurstBytes = 1024 // Only 1KB burst for instant start
+
+	// Fast poll for responsive streaming
+	pollInterval = 1 * time.Millisecond
 
 	// ICY metadata interval
 	icyMetadataInterval = 16000
@@ -61,7 +65,6 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Check if source is active
 	if !mount.IsActive() {
-		// Check for fallback mount
 		if mount.Config.FallbackMount != "" {
 			fallback := h.mountManager.GetMount(mount.Config.FallbackMount)
 			if fallback != nil && fallback.IsActive() {
@@ -76,13 +79,11 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check listener limits
+	// Quick capacity checks
 	if mount.ListenerCount() >= mount.Config.MaxListeners {
 		http.Error(w, "Maximum listeners reached", http.StatusServiceUnavailable)
 		return
 	}
-
-	// Check total client limit
 	if h.mountManager.TotalListeners() >= h.config.Limits.MaxClients {
 		http.Error(w, "Server at capacity", http.StatusServiceUnavailable)
 		return
@@ -98,175 +99,153 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if client wants ICY metadata
+	// ICY metadata
 	wantsMetadata := r.Header.Get("Icy-MetaData") == "1"
 	metadataInterval := 0
 	if wantsMetadata {
 		metadataInterval = icyMetadataInterval
 	}
 
-	h.logger.Printf("Listener connected: %s from %s (UA: %s, metadata: %v)",
-		mountPath, clientIP, userAgent, wantsMetadata)
+	h.logger.Printf("Listener connected: %s from %s", mountPath, clientIP)
 
-	// Set response headers
+	// CRITICAL: Set headers and flush IMMEDIATELY
 	h.setResponseHeaders(w, mount, metadataInterval)
+
+	// Get flusher and flush headers NOW
+	flusher, hasFlusher := w.(http.Flusher)
+	if hasFlusher {
+		flusher.Flush()
+	}
 
 	// Create listener
 	listener := stream.NewListener(w, clientIP, userAgent, mount)
 
-	// Add listener to mount
 	if err := mount.AddListener(listener); err != nil {
 		h.logger.Printf("Failed to add listener: %v", err)
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 
 	defer func() {
 		mount.RemoveListener(listener.ID)
-		h.logger.Printf("Listener disconnected: %s from %s (sent: %d bytes)",
-			mountPath, clientIP, listener.BytesSent)
+		h.logger.Printf("Listener disconnected: %s (sent: %d bytes)", mountPath, listener.BytesSent)
 	}()
 
-	// Stream data to listener with optimized low-latency delivery
-	h.streamToListener(w, listener, mount, metadataInterval)
+	// Stream with ultra-low latency
+	h.streamUltraLowLatency(w, flusher, hasFlusher, listener, mount, metadataInterval)
 }
 
 // setResponseHeaders sets HTTP headers for streaming response
 func (h *ListenerHandler) setResponseHeaders(w http.ResponseWriter, mount *stream.Mount, metadataInterval int) {
 	meta := mount.GetMetadata()
 
-	// Core streaming headers
+	// Essential headers only - minimize header processing time
 	w.Header().Set("Content-Type", meta.ContentType)
 	w.Header().Set("Connection", "close")
-	w.Header().Set("Cache-Control", "no-cache, no-store")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Expires", "Mon, 26 Jul 1997 05:00:00 GMT")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Transfer-Encoding", "chunked")
 
 	// ICY headers
-	w.Header().Set("icy-name", meta.Name)
-	w.Header().Set("icy-description", meta.Description)
-	w.Header().Set("icy-genre", meta.Genre)
-	w.Header().Set("icy-url", meta.URL)
-	w.Header().Set("icy-pub", boolToICY(meta.Public))
-
+	if meta.Name != "" {
+		w.Header().Set("icy-name", meta.Name)
+	}
 	if meta.Bitrate > 0 {
 		w.Header().Set("icy-br", strconv.Itoa(meta.Bitrate))
 	}
-
 	if metadataInterval > 0 {
 		w.Header().Set("icy-metaint", strconv.Itoa(metadataInterval))
 	}
 
-	// Server identification
-	w.Header().Set("Server", fmt.Sprintf("GoCast/%s", "1.0.0"))
+	// Server
+	w.Header().Set("Server", "GoCast/1.0")
 
-	// CORS headers for web players
+	// CORS for web players
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Origin, Accept, Content-Type, Icy-MetaData")
-	w.Header().Set("Access-Control-Expose-Headers", "icy-metaint, icy-name, icy-description, icy-genre, icy-url, icy-br")
 
+	// Send 200 OK immediately
 	w.WriteHeader(http.StatusOK)
 }
 
-// streamToListener streams audio data to the listener
-// Optimized for low latency and synchronized playback
-func (h *ListenerHandler) streamToListener(w http.ResponseWriter, listener *stream.Listener, mount *stream.Mount, metadataInterval int) {
-	// Get flusher for immediate writes
-	flusher, hasFlusher := w.(http.Flusher)
-
+// streamUltraLowLatency streams with minimum possible latency
+func (h *ListenerHandler) streamUltraLowLatency(w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metadataInterval int) {
 	buffer := mount.Buffer()
 
-	// OPTIMIZATION: Start at live position instead of burst position
-	// This dramatically reduces initial latency
-	readPos := buffer.GetLivePosition()
+	// Start at LIVE EDGE - not burst position
+	// This is the key to instant playback
+	writePos := buffer.WritePos()
+	readPos := writePos // Start exactly where we are NOW
 
-	// Send minimal burst data immediately for quick start
-	burstData := buffer.GetBurst()
-	if len(burstData) > 0 {
-		// Only send last 4KB of burst for fast start (was 64KB)
-		if len(burstData) > 4096 {
-			burstData = burstData[len(burstData)-4096:]
+	// Send tiny burst just to prime the player's buffer (optional)
+	// Most players need SOME data to start, but minimal
+	if writePos > int64(maxBurstBytes) {
+		burstStart := writePos - int64(maxBurstBytes)
+		burstData, _ := buffer.ReadFrom(burstStart, maxBurstBytes)
+		if len(burstData) > 0 {
+			w.Write(burstData)
+			if hasFlusher {
+				flusher.Flush()
+			}
+			listener.BytesSent += int64(len(burstData))
 		}
-
-		var err error
-		if metadataInterval > 0 {
-			var metaByteCount int
-			var lastMetadata string
-			err = h.writeWithMetadata(w, burstData, mount, &metaByteCount, &lastMetadata, metadataInterval)
-		} else {
-			_, err = w.Write(burstData)
-		}
-
-		if err != nil {
-			return
-		}
-
-		listener.BytesSent += int64(len(burstData))
-
-		if hasFlusher {
-			flusher.Flush()
-		}
-
-		// Update read position to after burst
-		readPos = buffer.WritePos()
+		readPos = writePos
 	}
 
-	// Track metadata for ICY injection
+	// Metadata tracking
 	var metaByteCount int
 	var lastMetadata string
 
-	// Use buffer's notify channel for efficient waiting
+	// Use notify channel for instant response to new data
 	notifyChan := buffer.NotifyChan()
 
-	// Timeout for connection health
-	timeoutDuration := h.config.Limits.ClientTimeout
-	if timeoutDuration == 0 {
-		timeoutDuration = 30 * time.Second
+	// Timeout
+	timeout := h.config.Limits.ClientTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
 	}
-	lastDataTime := time.Now()
+	lastActivity := time.Now()
 
-	// Poll ticker for when notify doesn't trigger
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
+	// Tight loop for ultra-low latency
 	for {
+		// Check if we should exit
 		select {
 		case <-listener.Done():
 			return
-
-		case <-notifyChan:
-			// New data available - read immediately
-
-		case <-ticker.C:
-			// Periodic check for data
+		default:
 		}
 
-		// Check if source is still active
+		// Check source active
 		if !mount.IsActive() {
 			return
 		}
 
-		// Check connection timeout
-		if time.Since(lastDataTime) > timeoutDuration {
-			h.logger.Printf("Listener timeout: %s", listener.ID)
+		// Check timeout
+		if time.Since(lastActivity) > timeout {
 			return
 		}
 
-		// OPTIMIZATION: Read smaller chunks more frequently
-		// This reduces latency and keeps listeners more in sync
-		data, newPos := buffer.ReadFrom(readPos, maxChunkSize)
+		// Try to read available data
+		data, newPos := buffer.ReadFrom(readPos, chunkSize)
+
 		if len(data) == 0 {
-			continue
+			// No data - wait briefly for notification or poll
+			select {
+			case <-listener.Done():
+				return
+			case <-notifyChan:
+				// Data available, loop immediately
+				continue
+			case <-time.After(pollInterval):
+				// Quick poll, try again
+				continue
+			}
 		}
 
 		readPos = newPos
-		lastDataTime = time.Now()
+		lastActivity = time.Now()
 
-		// Write data (with optional metadata injection)
+		// Write data
 		var err error
 		if metadataInterval > 0 {
-			err = h.writeWithMetadata(w, data, mount, &metaByteCount, &lastMetadata, metadataInterval)
+			err = writeWithMetadata(w, data, mount, &metaByteCount, &lastMetadata, metadataInterval)
 		} else {
 			_, err = w.Write(data)
 		}
@@ -276,17 +255,16 @@ func (h *ListenerHandler) streamToListener(w http.ResponseWriter, listener *stre
 		}
 
 		listener.BytesSent += int64(len(data))
-		listener.LastActive = time.Now()
+		listener.LastActive = lastActivity
 
-		// OPTIMIZATION: Flush immediately for low latency
+		// Flush EVERY write for lowest latency
 		if hasFlusher {
 			flusher.Flush()
 		}
 
-		// Check max listener duration
+		// Check listener duration limit
 		if mount.Config.MaxListenerDuration > 0 {
 			if time.Since(listener.ConnectedAt) > mount.Config.MaxListenerDuration {
-				h.logger.Printf("Listener max duration reached: %s", listener.ID)
 				return
 			}
 		}
@@ -294,19 +272,17 @@ func (h *ListenerHandler) streamToListener(w http.ResponseWriter, listener *stre
 }
 
 // writeWithMetadata writes data with ICY metadata injection
-func (h *ListenerHandler) writeWithMetadata(w io.Writer, data []byte, mount *stream.Mount, byteCount *int, lastMetadata *string, interval int) error {
+func writeWithMetadata(w io.Writer, data []byte, mount *stream.Mount, byteCount *int, lastMetadata *string, interval int) error {
 	for len(data) > 0 {
-		// Calculate bytes until next metadata point
 		bytesUntilMeta := interval - (*byteCount % interval)
 
 		if bytesUntilMeta > len(data) {
-			// Write all remaining data
 			n, err := w.Write(data)
 			*byteCount += n
 			return err
 		}
 
-		// Write data up to metadata point
+		// Write up to metadata point
 		n, err := w.Write(data[:bytesUntilMeta])
 		*byteCount += n
 		if err != nil {
@@ -314,44 +290,39 @@ func (h *ListenerHandler) writeWithMetadata(w io.Writer, data []byte, mount *str
 		}
 		data = data[bytesUntilMeta:]
 
-		// Write metadata block
-		if err := h.writeMetadataBlock(w, mount, lastMetadata); err != nil {
+		// Write metadata
+		if err := writeMetadataBlock(w, mount, lastMetadata); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
-// writeMetadataBlock writes an ICY metadata block
-func (h *ListenerHandler) writeMetadataBlock(w io.Writer, mount *stream.Mount, lastMetadata *string) error {
+// writeMetadataBlock writes ICY metadata
+func writeMetadataBlock(w io.Writer, mount *stream.Mount, lastMetadata *string) error {
 	meta := mount.GetMetadata()
 	streamTitle := meta.StreamTitle
 
-	// Check if metadata has changed
 	if streamTitle == *lastMetadata {
-		// No change, write empty metadata block (size = 0)
+		// No change - empty block
 		_, err := w.Write([]byte{0})
 		return err
 	}
 
 	*lastMetadata = streamTitle
 
-	// Format: StreamTitle='Song Title';
 	metaStr := fmt.Sprintf("StreamTitle='%s';", escapeMetadata(streamTitle))
 
-	// Calculate block size (16-byte blocks)
 	blockSize := (len(metaStr) + 15) / 16
 	if blockSize > 255 {
 		blockSize = 255
 		metaStr = metaStr[:255*16]
 	}
 
-	// Pad to full block
+	// Pad to block boundary
 	padding := blockSize*16 - len(metaStr)
 	metaStr += strings.Repeat("\x00", padding)
 
-	// Write block size byte and metadata
 	if _, err := w.Write([]byte{byte(blockSize)}); err != nil {
 		return err
 	}
@@ -359,42 +330,33 @@ func (h *ListenerHandler) writeMetadataBlock(w io.Writer, mount *stream.Mount, l
 	return err
 }
 
-// escapeMetadata escapes special characters in metadata
+// escapeMetadata escapes special characters
 func escapeMetadata(s string) string {
-	// Replace single quotes with escaped version
 	s = strings.ReplaceAll(s, "'", "\\'")
-	// Remove any null bytes
 	s = strings.ReplaceAll(s, "\x00", "")
 	return s
 }
 
-// checkIPAllowed checks if the client IP is allowed
+// checkIPAllowed checks if IP is allowed
 func (h *ListenerHandler) checkIPAllowed(mount *stream.Mount, clientIP string) bool {
-	// Check denied IPs first
 	for _, denied := range mount.Config.DeniedIPs {
 		if matchIP(clientIP, denied) {
 			return false
 		}
 	}
-
-	// If no allowed IPs specified, allow all
 	if len(mount.Config.AllowedIPs) == 0 {
 		return true
 	}
-
-	// Check allowed IPs
 	for _, allowed := range mount.Config.AllowedIPs {
 		if matchIP(clientIP, allowed) {
 			return true
 		}
 	}
-
 	return false
 }
 
-// matchIP checks if an IP matches a pattern (simple prefix matching)
+// matchIP matches IP against pattern
 func matchIP(ip, pattern string) bool {
-	// Simple matching - can be extended for CIDR notation
 	if pattern == "*" {
 		return true
 	}
@@ -404,7 +366,7 @@ func matchIP(ip, pattern string) bool {
 	return ip == pattern
 }
 
-// boolToICY converts a boolean to ICY format (1 or 0)
+// boolToICY converts bool to ICY format
 func boolToICY(b bool) string {
 	if b {
 		return "1"
@@ -412,20 +374,15 @@ func boolToICY(b bool) string {
 	return "0"
 }
 
-// getClientIP extracts the client IP from the request
+// getClientIP extracts client IP
 func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
 		return strings.TrimSpace(parts[0])
 	}
-
-	// Check X-Real-IP header
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
 		return xri
 	}
-
-	// Use RemoteAddr
 	addr := r.RemoteAddr
 	if idx := strings.LastIndex(addr, ":"); idx != -1 {
 		return addr[:idx]
@@ -433,7 +390,7 @@ func getClientIP(r *http.Request) string {
 	return addr
 }
 
-// HandleOptions handles CORS preflight requests
+// HandleOptions handles CORS preflight
 func (h *ListenerHandler) HandleOptions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -442,27 +399,20 @@ func (h *ListenerHandler) HandleOptions(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// StatusHandler returns server status in various formats
+// StatusHandler returns server status
 type StatusHandler struct {
 	mountManager *stream.MountManager
 	config       *config.Config
 }
 
-// NewStatusHandler creates a new status handler
+// NewStatusHandler creates a status handler
 func NewStatusHandler(mm *stream.MountManager, cfg *config.Config) *StatusHandler {
-	return &StatusHandler{
-		mountManager: mm,
-		config:       cfg,
-	}
+	return &StatusHandler{mountManager: mm, config: cfg}
 }
 
-// ServeHTTP serves status information
+// ServeHTTP serves status
 func (h *StatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("format")
-	if format == "" {
-		format = "html"
-	}
-
 	switch format {
 	case "json":
 		h.serveJSON(w, r)
@@ -473,150 +423,67 @@ func (h *StatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveJSON serves status as JSON
+// serveJSON serves JSON status
 func (h *StatusHandler) serveJSON(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-
 	stats := h.mountManager.Stats()
 
-	fmt.Fprintf(w, `{"icestats":{"admin":"%s","host":"%s","location":"%s","server_id":"GoCast/1.0.0",`,
-		h.config.Server.AdminRoot, h.config.Server.Hostname, h.config.Server.Location)
-	fmt.Fprintf(w, `"server_start":"","source":[`)
-
+	fmt.Fprintf(w, `{"icestats":{"server_id":"GoCast/1.0.0","source":[`)
 	for i, stat := range stats {
 		if i > 0 {
 			fmt.Fprint(w, ",")
 		}
-		fmt.Fprintf(w, `{"listenurl":"http://%s:%d%s",`,
-			h.config.Server.Hostname, h.config.Server.Port, stat.Path)
-		fmt.Fprintf(w, `"listeners":%d,"peak_listeners":%d,`,
-			stat.Listeners, stat.PeakListeners)
-		fmt.Fprintf(w, `"audio_info":"","genre":"%s","server_description":"%s",`,
-			stat.Metadata.Genre, stat.Metadata.Description)
-		fmt.Fprintf(w, `"server_name":"%s","server_type":"%s",`,
-			stat.Metadata.Name, stat.ContentType)
-		fmt.Fprintf(w, `"stream_start":"","title":"%s"}`,
-			escapeJSON(stat.Metadata.StreamTitle))
+		fmt.Fprintf(w, `{"mount":"%s","listeners":%d,"peak":%d,"active":%v}`,
+			stat.Path, stat.Listeners, stat.PeakListeners, stat.Active)
 	}
-
 	fmt.Fprint(w, "]}}")
 }
 
-// serveXML serves status as XML (Icecast compatible)
+// serveXML serves XML status
 func (h *StatusHandler) serveXML(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/xml")
+	fmt.Fprint(w, `<?xml version="1.0"?><icestats>`)
+	for _, stat := range h.mountManager.Stats() {
+		fmt.Fprintf(w, `<source mount="%s"><listeners>%d</listeners></source>`,
+			stat.Path, stat.Listeners)
+	}
+	fmt.Fprint(w, `</icestats>`)
+}
 
-	fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>`)
-	fmt.Fprint(w, "\n<icestats>")
-	fmt.Fprintf(w, "<admin>%s</admin>", h.config.Server.AdminRoot)
-	fmt.Fprintf(w, "<host>%s</host>", h.config.Server.Hostname)
-	fmt.Fprintf(w, "<location>%s</location>", h.config.Server.Location)
-	fmt.Fprint(w, "<server_id>GoCast/1.0.0</server_id>")
+// serveHTML serves HTML status
+func (h *StatusHandler) serveHTML(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprint(w, `<!DOCTYPE html><html><head><title>GoCast</title>
+<style>body{font-family:system-ui;margin:40px;background:#111;color:#eee}
+h1{color:#00ADD8}.mount{background:#222;padding:20px;margin:10px 0;border-radius:8px}
+.live{color:#4f4}.offline{color:#f44}</style></head>
+<body><h1>🎵 GoCast Status</h1>`)
 
 	for _, stat := range h.mountManager.Stats() {
-		fmt.Fprint(w, "<source>")
-		fmt.Fprintf(w, "<mount>%s</mount>", stat.Path)
-		fmt.Fprintf(w, "<listeners>%d</listeners>", stat.Listeners)
-		fmt.Fprintf(w, "<peak_listeners>%d</peak_listeners>", stat.PeakListeners)
-		fmt.Fprintf(w, "<genre>%s</genre>", escapeXML(stat.Metadata.Genre))
-		fmt.Fprintf(w, "<server_name>%s</server_name>", escapeXML(stat.Metadata.Name))
-		fmt.Fprintf(w, "<server_description>%s</server_description>", escapeXML(stat.Metadata.Description))
-		fmt.Fprintf(w, "<server_type>%s</server_type>", stat.ContentType)
-		fmt.Fprintf(w, "<server_url>%s</server_url>", escapeXML(stat.Metadata.URL))
-		fmt.Fprintf(w, "<title>%s</title>", escapeXML(stat.Metadata.StreamTitle))
-		fmt.Fprintf(w, "<listenurl>http://%s:%d%s</listenurl>",
-			h.config.Server.Hostname, h.config.Server.Port, stat.Path)
-		fmt.Fprint(w, "</source>")
-	}
-
-	fmt.Fprint(w, "</icestats>")
-}
-
-// serveHTML serves status as HTML
-func (h *StatusHandler) serveHTML(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	fmt.Fprint(w, `<!DOCTYPE html>
-<html>
-<head>
-<title>GoCast Server Status</title>
-<style>
-body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-h1 { color: #333; }
-.mount { background: white; padding: 15px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-.mount h2 { margin-top: 0; color: #2196F3; }
-.info { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
-.info-item { background: #f9f9f9; padding: 10px; border-radius: 4px; }
-.info-item label { font-weight: bold; color: #666; }
-.info-item span { display: block; color: #333; }
-.listeners { font-size: 24px; color: #4CAF50; }
-.offline { color: #999; }
-</style>
-</head>
-<body>
-<h1>🎵 GoCast Server Status</h1>
-<p>Server: `+h.config.Server.Hostname+` | Location: `+h.config.Server.Location+`</p>
-`)
-
-	stats := h.mountManager.Stats()
-	if len(stats) == 0 {
-		fmt.Fprint(w, `<p class="offline">No active streams</p>`)
-	}
-
-	for _, stat := range stats {
-		status := "🔴 Offline"
+		status := `<span class="offline">● Offline</span>`
 		if stat.Active {
-			status = "🟢 Live"
+			status = `<span class="live">● Live</span>`
 		}
-
-		fmt.Fprintf(w, `<div class="mount">
-<h2>%s %s</h2>
-<div class="info">
-<div class="info-item"><label>Listeners</label><span class="listeners">%d</span></div>
-<div class="info-item"><label>Peak</label><span>%d</span></div>
-<div class="info-item"><label>Now Playing</label><span>%s</span></div>
-<div class="info-item"><label>Genre</label><span>%s</span></div>
-<div class="info-item"><label>Description</label><span>%s</span></div>
-<div class="info-item"><label>Content Type</label><span>%s</span></div>
-<div class="info-item"><label>Listen URL</label><span><a href="http://%s:%d%s">http://%s:%d%s</a></span></div>
-</div>
-</div>`,
-			stat.Path, status,
-			stat.Listeners,
-			stat.PeakListeners,
-			stat.Metadata.StreamTitle,
-			stat.Metadata.Genre,
-			stat.Metadata.Description,
-			stat.ContentType,
-			h.config.Server.Hostname, h.config.Server.Port, stat.Path,
-			h.config.Server.Hostname, h.config.Server.Port, stat.Path,
-		)
+		fmt.Fprintf(w, `<div class="mount"><h2>%s %s</h2>
+<p>Listeners: <strong>%d</strong> (peak: %d)</p>
+<p>Listen: <a href="%s">%s</a></p></div>`,
+			stat.Path, status, stat.Listeners, stat.PeakListeners,
+			stat.Path, stat.Path)
 	}
-
-	fmt.Fprint(w, `
-<p style="margin-top: 20px; color: #999; font-size: 12px;">
-Powered by GoCast - A modern Icecast replacement written in Go
-</p>
-</body>
-</html>`)
+	fmt.Fprint(w, `</body></html>`)
 }
 
-// escapeXML escapes special XML characters
+// escapeXML escapes XML
 func escapeXML(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
-	s = strings.ReplaceAll(s, "'", "&apos;")
-	s = strings.ReplaceAll(s, "\"", "&quot;")
 	return s
 }
 
-// escapeJSON escapes special JSON characters
+// escapeJSON escapes JSON
 func escapeJSON(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "\"", "\\\"")
-	s = strings.ReplaceAll(s, "\n", "\\n")
-	s = strings.ReplaceAll(s, "\r", "\\r")
-	s = strings.ReplaceAll(s, "\t", "\\t")
 	return s
 }
