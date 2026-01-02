@@ -2,8 +2,6 @@
 
 <img src="assets/logo.svg" alt="GoCast" width="400">
 
-# GoCast
-
 ### A Modern, Drop-in Replacement for Icecast
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go)](https://go.dev)
