@@ -557,7 +557,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 
 	// Authenticate admin
 	username, password, ok := r.BasicAuth()
-	if !ok || username != s.config.Admin.User || password != s.config.Admin.Password {
+	if !ok || username != s.config.Auth.AdminUser || password != s.config.Auth.AdminPassword {
 		w.Header().Set("WWW-Authenticate", `Basic realm="GoCast Admin"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -891,7 +891,7 @@ func (s *Server) handleAdminToken(w http.ResponseWriter, r *http.Request) {
 
 	// Authenticate admin
 	username, password, ok := r.BasicAuth()
-	if !ok || username != s.config.Admin.User || password != s.config.Admin.Password {
+	if !ok || username != s.config.Auth.AdminUser || password != s.config.Auth.AdminPassword {
 		w.Header().Set("WWW-Authenticate", `Basic realm="GoCast Admin"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return

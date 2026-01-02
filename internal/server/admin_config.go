@@ -188,7 +188,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		Auth: AuthConfigDTO{
 			SourcePassword: cfg.Auth.SourcePassword,
-			AdminUser:      cfg.Admin.User,
+			AdminUser:      cfg.Auth.AdminUser,
 			// Don't expose admin password
 		},
 		Logging: LoggingConfigDTO{

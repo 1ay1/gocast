@@ -171,8 +171,6 @@ func (cm *ConfigManager) createInitialConfig() *Config {
 
 	cfg.Auth.AdminUser = "admin"
 	cfg.Auth.AdminPassword = adminPassword
-	cfg.Admin.User = "admin"
-	cfg.Admin.Password = adminPassword
 
 	// Generate secure source password
 	cfg.Auth.SourcePassword = generateSecurePassword(12)
@@ -467,10 +465,6 @@ func (cm *ConfigManager) validateAndFix(cfg *Config) []string {
 		cfg.Auth.SourcePassword = newPass
 	}
 
-	// Sync admin config
-	cfg.Admin.User = cfg.Auth.AdminUser
-	cfg.Admin.Password = cfg.Auth.AdminPassword
-
 	// Validate and fix mount configurations
 	for path, mount := range cfg.Mounts {
 		mountWarnings := cm.validateMount(path, mount)
@@ -750,11 +744,9 @@ func (cm *ConfigManager) UpdateAuth(sourcePassword, adminUser, adminPassword *st
 	}
 	if adminUser != nil {
 		cm.config.Auth.AdminUser = *adminUser
-		cm.config.Admin.User = *adminUser
 	}
 	if adminPassword != nil {
 		cm.config.Auth.AdminPassword = *adminPassword
-		cm.config.Admin.Password = *adminPassword
 	}
 
 	if err := cm.saveUnlocked(); err != nil {

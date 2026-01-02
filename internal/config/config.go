@@ -126,9 +126,7 @@ type MountConfig struct {
 
 // AdminConfig contains admin interface settings
 type AdminConfig struct {
-	Enabled  bool   `json:"enabled"`
-	User     string `json:"user"`
-	Password string `json:"password"`
+	Enabled bool `json:"enabled"`
 }
 
 // DirectoryConfig contains directory/YP settings
@@ -187,9 +185,7 @@ func DefaultConfig() *Config {
 		},
 		Mounts: make(map[string]*MountConfig),
 		Admin: AdminConfig{
-			Enabled:  true,
-			User:     "admin",
-			Password: "hackme",
+			Enabled: true,
 		},
 		Directory: DirectoryConfig{
 			Enabled:         false,
