@@ -684,7 +684,7 @@
                     <span id="serverStatusText">Server Online</span>
                 </div>
                 <div class="status-badge">
-                    <span>🕐</span></span>
+                    <span>🕐</span>
                     <span id="uptime">0:00:00</span>
                 </div>
             </div>
@@ -727,7 +727,7 @@
             <!-- Left Column -->
             <div>
                 <!-- Mounts Panel -->
-                <div</div> class="panel" style="margin-bottom: 1.5rem;">
+                <div class="panel" style="margin-bottom: 1.5rem;">
                     <div class="panel-header">
                         <h2 class="panel-title">
                             <span>📡</span> Mount Points
@@ -737,57 +737,9 @@
                         </button>
                     </div>
                     <div class="panel-body" id="mountsContainer">
-                        <!-- Mount cards will be inserted here -->
-                        <div class="mount-card live">
-                            <div class="mount-header">
-                                <span class="mount-name">/live</span>
-                                <span class="mount-status live">
-                                    <span class="status-dot live"></span>
-                                    LIVE
-                                </span>
-                            </div>
-                            <div class="visualizer">
-                                <div class="visualizer-bar"></div>
-                                <div class="visualizer-bar"></div>
-                                <div class="visualizer-bar"></div>
-                                <div class="visualizer-bar"></div>
-                                <div class="visualizer-bar"></div>
-                                <div class="visualizer-bar"></div>
-                                <div class="visualizer-bar"></div>
-                                <div class="visualizer-bar"></div>
-                            </div>
-                            <div class="mount-meta">
-                                <div class="mount-meta-item">
-                                    <div class="mount-meta-value" id="mountListeners">0</div>
-                                    <div class="mount-meta-label">Listeners</div>
-                                </div>
-                                <div class="mount-meta-item">
-                                    <div class="mount-meta-value" id="mountPeak">0</div>
-                                    <div class="mount-meta-label">Peak</div>
-                                </div>
-                                <div class="mount-meta-item">
-                                    <div class="mount-meta-value">320</div>
-                                    <div class="mount-meta-label">Kbps</div>
-                                </div>
-                            </div>
-                            <div class="now-playing">
-                                <span class="now-playing-icon">🎵</span>
-                                <div class="now-playing-text">
-                                    <div class="now-playing-label">Now Playing</div>
-                                    <div class="now-playing-title" id="nowPlaying">Loading...</div>
-                                </div>
-                            </div>
-                            <div class="mount-actions">
-                                <button class="btn btn-secondary" onclick="window.open('/live', '_blank')">
-                                    ▶️ Listen
-                                </button>
-                                <button class="btn btn-secondary" onclick="copyToClipboard('http://' + location.host + '/live')">
-                                    📋 Copy URL
-                                </button>
-                                <button class="btn btn-danger" onclick="if(confirm('Kill source?')) fetch('/admin/killsource?mount=/live')">
-                                    ⏹️ Kill Source
-                                </button>
-                            </div>
+                        <!-- Mount cards will be dynamically inserted here -->
+                        <div class="mount-card offline" id="no-mounts-msg">
+                            <p style="text-align: center; color: var(--text-muted);">Loading mounts...</p>
                         </div>
                     </div>
                 </div>
@@ -869,6 +821,8 @@
         // State
         let startTime = Date.now();
         let activityLogs = [];
+        let prevSources = {};
+        let streamStartTime = null;
 
         // Update uptime
         function updateUptime() {
@@ -878,6 +832,99 @@
             const seconds = elapsed % 60;
             document.getElementById('uptime').textContent =
                 `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+
+            // Update stream uptime if active
+            if (streamStartTime) {
+                const streamElapsed = Math.floor((Date.now() - streamStartTime) / 1000);
+                const sh = Math.floor(streamElapsed / 3600);
+                const sm = Math.floor((streamElapsed % 3600) / 60);
+                const ss = streamElapsed % 60;
+                document.getElementById('streamUptime').textContent =
+                    `${sh}:${sm.toString().padStart(2, '0')}:${ss.toString().padStart(2, '0')}`;
+            }
+        }
+
+        // Generate mount card HTML
+        function generateMountCard(source) {
+            const isLive = source.active;
+            const statusClass = isLive ? 'live' : 'offline';
+            const statusText = isLive ? 'LIVE' : 'OFFLINE';
+            const title = source.title || source.mount;
+            const bitrate = source.bitrate || 320;
+            const genre = source.genre || 'Various';
+
+            const visualizerBars = isLive ? `
+                <div class="visualizer">
+                    <div class="visualizer-bar"></div>
+                    <div class="visualizer-bar"></div>
+                    <div class="visualizer-bar"></div>
+                    <div class="visualizer-bar"></div>
+                    <div class="visualizer-bar"></div>
+                    <div class="visualizer-bar"></div>
+                    <div class="visualizer-bar"></div>
+                    <div class="visualizer-bar"></div>
+                </div>` : '';
+
+            return `
+                <div class="mount-card ${statusClass}" data-mount="${source.mount}">
+                    <div class="mount-header">
+                        <span class="mount-name">${source.mount}</span>
+                        <span class="mount-status ${statusClass}">
+                            <span class="status-dot ${statusClass}"></span>
+                            ${statusText}
+                        </span>
+                    </div>
+                    ${visualizerBars}
+                    <div class="mount-meta">
+                        <div class="mount-meta-item">
+                            <div class="mount-meta-value">${source.listeners || 0}</div>
+                            <div class="mount-meta-label">Listeners</div>
+                        </div>
+                        <div class="mount-meta-item">
+                            <div class="mount-meta-value">${source.peak || 0}</div>
+                            <div class="mount-meta-label">Peak</div>
+                        </div>
+                        <div class="mount-meta-item">
+                            <div class="mount-meta-value">${bitrate}</div>
+                            <div class="mount-meta-label">Kbps</div>
+                        </div>
+                    </div>
+                    <div class="now-playing">
+                        <span class="now-playing-icon">🎵</span>
+                        <div class="now-playing-text">
+                            <div class="now-playing-label">${isLive ? 'Now Playing' : 'Status'}</div>
+                            <div class="now-playing-title">${isLive ? title : 'No source connected'}</div>
+                        </div>
+                    </div>
+                    ${source.genre ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.5rem;">Genre: ${source.genre}</div>` : ''}
+                    <div class="mount-actions">
+                        <button class="btn btn-secondary" onclick="window.open('${source.mount}', '_blank')" ${!isLive ? 'disabled style="opacity:0.5"' : ''}>
+                            ▶️ Listen
+                        </button>
+                        <button class="btn btn-secondary" onclick="copyToClipboard('http://' + location.host + '${source.mount}')">
+                            📋 Copy URL
+                        </button>
+                        <button class="btn btn-danger" onclick="killSource('${source.mount}')" ${!isLive ? 'disabled style="opacity:0.5"' : ''}>
+                            ⏹️ Kill Source
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Render all mounts
+        function renderMounts(sources) {
+            const container = document.getElementById('mountsContainer');
+
+            if (!sources || sources.length === 0) {
+                container.innerHTML = '<div class="mount-card offline"><p style="text-align: center; color: var(--text-muted);">No mounts configured</p></div>';
+                return;
+            }
+
+            // Sort: active mounts first
+            sources.sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0));
+
+            container.innerHTML = sources.map(generateMountCard).join('');
         }
 
         // Fetch stats from server
@@ -891,20 +938,55 @@
                     let totalListeners = 0;
                     let activeMounts = 0;
                     let peakListeners = 0;
+                    let totalBandwidth = 0;
 
                     sources.forEach(source => {
                         totalListeners += source.listeners || 0;
                         peakListeners = Math.max(peakListeners, source.peak || 0);
-                        if (source.active) activeMounts++;
+
+                        if (source.active) {
+                            activeMounts++;
+                            // Bandwidth: listeners * bitrate (kbps) / 8 = KB/s
+                            totalBandwidth += (source.listeners || 0) * (source.bitrate || 320) / 8;
+
+                            // Track stream start time
+                            if (!streamStartTime) {
+                                streamStartTime = Date.now();
+                            }
+                        }
+
+                        // Track changes for activity log
+                        const prevSource = prevSources[source.mount] || {};
+                        if (prevSource.listeners !== undefined && prevSource.listeners !== source.listeners) {
+                            const diff = source.listeners - prevSource.listeners;
+                            if (diff > 0) {
+                                addLog('connect', `+${diff} listener(s) on ${source.mount}`);
+                            } else if (diff < 0) {
+                                addLog('disconnect', `${diff} listener(s) on ${source.mount}`);
+                            }
+                        }
+                        if (prevSource.active === false && source.active === true) {
+                            addLog('source', `Source connected on ${source.mount}`);
+                            streamStartTime = Date.now();
+                        } else if (prevSource.active === true && source.active === false) {
+                            addLog('source', `Source disconnected from ${source.mount}`);
+                        }
+                        prevSources[source.mount] = {...source};
                     });
 
+                    // Reset stream time if no active mounts
+                    if (activeMounts === 0) {
+                        streamStartTime = null;
+                        document.getElementById('streamUptime').textContent = '--:--';
+                    }
+
+                    // Update stats
                     document.getElementById('totalListeners').textContent = totalListeners;
                     document.getElementById('activeMounts').textContent = activeMounts;
-                    document.getElementById('mountListeners').textContent = totalListeners;
-                    document.getElementById('mountPeak').textContent = peakListeners;
+                    document.getElementById('bandwidth').textContent = totalBandwidth.toFixed(0);
 
-                    // Update bandwidth (estimate)
-                    document.getElementById('bandwidth').textContent = (totalListeners * 40).toFixed(0);
+                    // Render mount cards
+                    renderMounts(sources);
                 }
 
                 // Update server status
@@ -915,6 +997,26 @@
                 console.error('Failed to fetch stats:', error);
                 document.getElementById('serverStatus').className = 'status-dot offline';
                 document.getElementById('serverStatusText').textContent = 'Connection Error';
+            }
+        }
+
+        // Kill source
+        async function killSource(mount) {
+            if (!confirm(`Kill source on ${mount}?`)) return;
+
+            try {
+                const response = await fetch(`/admin/killsource?mount=${encodeURIComponent(mount)}`, {
+                    method: 'GET',
+                    credentials: 'include'
+                });
+                if (response.ok) {
+                    addLog('source', `Killed source on ${mount}`);
+                    fetchStats();
+                } else {
+                    alert('Failed to kill source: ' + response.statusText);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
             }
         }
 
@@ -931,6 +1033,10 @@
 
         function renderLogs() {
             const container = document.getElementById('activityLog');
+            if (activityLogs.length === 0) {
+                container.innerHTML = '<div class="log-entry"><span class="log-time">--:--:--</span><span class="log-message">No activity yet</span></div>';
+                return;
+            }
             container.innerHTML = activityLogs.map(log => `
                 <div class="log-entry">
                     <span class="log-time">${log.time}</span>
@@ -945,16 +1051,23 @@
         // Copy to clipboard
         function copyToClipboard(text) {
             navigator.clipboard.writeText(text).then(() => {
-                alert('Copied to clipboard!');
+                // Show brief notification instead of alert
+                const btn = event.target;
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '✓ Copied!';
+                setTimeout(() => btn.innerHTML = originalText, 1500);
+            }).catch(() => {
+                // Fallback
+                prompt('Copy this URL:', text);
             });
         }
 
         // Initialize
         setInterval(updateUptime, 1000);
-        setInterval(fetchStats, 2000);
-        fetchStats();
+        setInterval(fetchStats, 1000); // Update every second for real-time feel
 
-        // Initial log
+        // Initial fetch
+        fetchStats();
         addLog('source', 'Admin panel loaded');
     </script>
 </body>

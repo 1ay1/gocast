@@ -248,12 +248,29 @@ func (h *Handler) checkCredentials(username, password, mountPath string) bool {
 }
 
 // parseMetadata extracts metadata from request headers
+// Falls back to mount config defaults if headers not provided
 func (h *Handler) parseMetadata(r *http.Request, mount *stream.Mount) {
 	meta := &stream.Metadata{}
 
-	// ICY headers
+	// Start with mount config defaults
+	if mount.Config != nil {
+		meta.Name = mount.Config.StreamName
+		meta.Description = mount.Config.Description
+		meta.Genre = mount.Config.Genre
+		meta.URL = mount.Config.URL
+		meta.Bitrate = mount.Config.Bitrate
+		meta.Public = mount.Config.Public
+		meta.ContentType = mount.Config.Type
+		// Set default stream title from config
+		if mount.Config.StreamName != "" {
+			meta.StreamTitle = mount.Config.StreamName
+		}
+	}
+
+	// ICY headers override defaults
 	if v := r.Header.Get("ice-name"); v != "" {
 		meta.Name = v
+		meta.StreamTitle = v // Also use as initial stream title
 	}
 	if v := r.Header.Get("ice-description"); v != "" {
 		meta.Description = v
@@ -272,16 +289,37 @@ func (h *Handler) parseMetadata(r *http.Request, mount *stream.Mount) {
 	if v := r.Header.Get("ice-public"); v != "" {
 		meta.Public = v == "1" || v == "true"
 	}
+	if v := r.Header.Get("ice-audio-info"); v != "" {
+		// Parse audio info for bitrate if not already set
+		// Format: ice-audio-info=bitrate=320;samplerate=44100
+		if meta.Bitrate == 0 {
+			for _, part := range strings.Split(v, ";") {
+				kv := strings.SplitN(part, "=", 2)
+				if len(kv) == 2 && kv[0] == "bitrate" {
+					if bitrate, err := strconv.Atoi(kv[1]); err == nil {
+						meta.Bitrate = bitrate
+					}
+				}
+			}
+		}
+	}
 
-	// Content-Type
+	// Content-Type from header or default
 	if v := r.Header.Get("Content-Type"); v != "" {
 		meta.ContentType = v
-	} else {
-		// Default based on common formats
-		meta.ContentType = mount.Config.Type
+	}
+	if meta.ContentType == "" {
+		meta.ContentType = "audio/mpeg"
+	}
+
+	// If still no stream title, use mount path
+	if meta.StreamTitle == "" {
+		meta.StreamTitle = "Live Stream on " + mount.Path
 	}
 
 	mount.UpdateMetadata(meta)
+	h.logger.Printf("Mount %s metadata: name=%s, title=%s, bitrate=%d",
+		mount.Path, meta.Name, meta.StreamTitle, meta.Bitrate)
 }
 
 // streamSource reads data from the request body and writes to the mount

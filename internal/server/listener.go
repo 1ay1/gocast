@@ -426,6 +426,7 @@ func (h *StatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serveJSON serves JSON status
 func (h *StatusHandler) serveJSON(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	stats := h.mountManager.Stats()
 
 	fmt.Fprintf(w, `{"icestats":{"server_id":"GoCast/1.0.0","source":[`)
@@ -433,8 +434,18 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter, r *http.Request) {
 		if i > 0 {
 			fmt.Fprint(w, ",")
 		}
-		fmt.Fprintf(w, `{"mount":"%s","listeners":%d,"peak":%d,"active":%v}`,
-			stat.Path, stat.Listeners, stat.PeakListeners, stat.Active)
+		title := stat.Metadata.StreamTitle
+		if title == "" {
+			title = stat.Metadata.Name
+		}
+		genre := stat.Metadata.Genre
+		description := stat.Metadata.Description
+		bitrate := stat.Metadata.Bitrate
+		contentType := stat.ContentType
+
+		fmt.Fprintf(w, `{"mount":"%s","listeners":%d,"peak":%d,"active":%v,"title":"%s","genre":"%s","description":"%s","bitrate":%d,"content_type":"%s"}`,
+			stat.Path, stat.Listeners, stat.PeakListeners, stat.Active,
+			escapeJSON(title), escapeJSON(genre), escapeJSON(description), bitrate, contentType)
 	}
 	fmt.Fprint(w, "]}}")
 }
