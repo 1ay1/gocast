@@ -282,25 +282,42 @@ func (h *Handler) parseMetadata(r *http.Request, mount *stream.Mount) {
 		meta.URL = v
 	}
 	if v := r.Header.Get("ice-bitrate"); v != "" {
-		if bitrate, err := strconv.Atoi(v); err == nil {
+		if bitrate, err := strconv.Atoi(v); err == nil && bitrate > 0 {
 			meta.Bitrate = bitrate
+		}
+	}
+	// Also check Audio-Info header for bitrate (ffmpeg sends this)
+	if v := r.Header.Get("Audio-Info"); v != "" {
+		for _, part := range strings.Split(v, ";") {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) == 2 && strings.ToLower(kv[0]) == "bitrate" {
+				if bitrate, err := strconv.Atoi(kv[1]); err == nil && bitrate > 0 {
+					meta.Bitrate = bitrate
+				}
+			}
 		}
 	}
 	if v := r.Header.Get("ice-public"); v != "" {
 		meta.Public = v == "1" || v == "true"
 	}
 	if v := r.Header.Get("ice-audio-info"); v != "" {
-		// Parse audio info for bitrate if not already set
+		// Parse audio info for bitrate
 		// Format: ice-audio-info=bitrate=320;samplerate=44100
-		if meta.Bitrate == 0 {
-			for _, part := range strings.Split(v, ";") {
-				kv := strings.SplitN(part, "=", 2)
-				if len(kv) == 2 && kv[0] == "bitrate" {
-					if bitrate, err := strconv.Atoi(kv[1]); err == nil {
-						meta.Bitrate = bitrate
-					}
+		for _, part := range strings.Split(v, ";") {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) == 2 && strings.ToLower(kv[0]) == "bitrate" {
+				if bitrate, err := strconv.Atoi(kv[1]); err == nil && bitrate > 0 {
+					meta.Bitrate = bitrate
 				}
 			}
+		}
+	}
+	// Default to 320 if still using config default of 128 (common misconfiguration)
+	if meta.Bitrate == 128 || meta.Bitrate == 0 {
+		// Check Content-Type for hints
+		ct := strings.ToLower(meta.ContentType)
+		if strings.Contains(ct, "mp3") || strings.Contains(ct, "mpeg") {
+			meta.Bitrate = 320 // Assume high quality for MP3
 		}
 	}
 
@@ -315,6 +332,16 @@ func (h *Handler) parseMetadata(r *http.Request, mount *stream.Mount) {
 	// If still no stream title, use mount path
 	if meta.StreamTitle == "" {
 		meta.StreamTitle = "Live Stream on " + mount.Path
+	}
+
+	// Log all received headers for debugging
+	h.logger.Printf("Source headers for %s:", mount.Path)
+	for key, values := range r.Header {
+		if strings.HasPrefix(strings.ToLower(key), "ice") ||
+			strings.HasPrefix(strings.ToLower(key), "audio") ||
+			strings.ToLower(key) == "content-type" {
+			h.logger.Printf("  %s: %v", key, values)
+		}
 	}
 
 	mount.UpdateMetadata(meta)

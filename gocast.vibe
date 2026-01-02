@@ -98,7 +98,7 @@ mounts {
         genre "Various"
         description "Live broadcast stream"
         url "http://example.com"
-        bitrate 128
+        bitrate 320
         type audio/mpeg
         public true
 
