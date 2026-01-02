@@ -5,9 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -20,15 +21,13 @@ import (
 	"github.com/gocast/gocast/internal/stream"
 )
 
-// Version is the GoCast server version
-const Version = "1.0.0"
-
-//go:embed admin_panel.html
-var adminPanelHTML string
+//go:embed admin
+var adminFS embed.FS
 
 // Server is the main GoCast HTTP server
 type Server struct {
 	config          *config.Config
+	configManager   *config.ConfigManager
 	mountManager    *stream.MountManager
 	httpServer      *http.Server
 	httpsServer     *http.Server
@@ -61,6 +60,7 @@ func New(cfg *config.Config, logger *log.Logger) *Server {
 
 	s := &Server{
 		config:          cfg,
+		configManager:   nil,
 		mountManager:    mm,
 		listenerHandler: NewListenerHandler(mm, cfg, logger),
 		sourceHandler:   source.NewHandler(mm, cfg, logger),
@@ -75,6 +75,47 @@ func New(cfg *config.Config, logger *log.Logger) *Server {
 	go s.cleanupTokens()
 
 	return s
+}
+
+// NewWithConfigManager creates a new GoCast server with a config manager
+func NewWithConfigManager(cm *config.ConfigManager, logger *log.Logger) *Server {
+	if logger == nil {
+		logger = log.Default()
+	}
+
+	cfg := cm.GetConfig()
+	mm := stream.NewMountManager(cfg)
+
+	s := &Server{
+		config:          cfg,
+		configManager:   cm,
+		mountManager:    mm,
+		listenerHandler: NewListenerHandler(mm, cfg, logger),
+		sourceHandler:   source.NewHandler(mm, cfg, logger),
+		metadataHandler: source.NewMetadataHandler(mm, cfg, logger),
+		statusHandler:   NewStatusHandler(mm, cfg),
+		logger:          logger,
+		startTime:       time.Now(),
+		sessionTokens:   make(map[string]time.Time),
+	}
+
+	// Register for config changes
+	cm.OnChange(func(newCfg *config.Config) {
+		s.mu.Lock()
+		s.config = newCfg
+		s.mu.Unlock()
+		s.logger.Println("Configuration updated")
+	})
+
+	// Clean up expired tokens periodically
+	go s.cleanupTokens()
+
+	return s
+}
+
+// GetConfigManager returns the config manager (may be nil)
+func (s *Server) GetConfigManager() *config.ConfigManager {
+	return s.configManager
 }
 
 // cleanupTokens removes expired session tokens
@@ -234,6 +275,12 @@ func (s *Server) createRouter() http.Handler {
 			return
 		}
 
+		// Admin static assets (CSS, JS)
+		if strings.HasPrefix(path, "/admin/css/") || strings.HasPrefix(path, "/admin/js/") {
+			s.serveAdminStatic(w, r)
+			return
+		}
+
 		// Admin endpoints
 		if strings.HasPrefix(path, "/admin/") {
 			s.handleAdmin(w, r)
@@ -330,6 +377,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 
 	case path == "/admin/events":
 		s.handleAdminEvents(w, r)
+
+	case strings.HasPrefix(path, "/admin/config"):
+		s.handleAdminConfig(w, r)
 
 	case path == "/admin/", path == "/admin":
 		s.handleAdminIndex(w, r)
@@ -436,7 +486,7 @@ func (s *Server) handleAdminKillClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mount.RemoveListener(clientID)
+	mount.RemoveListenerByID(clientID)
 
 	w.Header().Set("Content-Type", "text/xml")
 	fmt.Fprint(w, `<?xml version="1.0"?><iceresponse><message>Client killed</message><return>1</return></iceresponse>`)
@@ -587,14 +637,53 @@ func (s *Server) handleAdminListMounts(w http.ResponseWriter, r *http.Request) {
 
 // handleModernAdminPanel serves the modern admin panel
 func (s *Server) handleModernAdminPanel(w http.ResponseWriter, r *http.Request) {
+	s.serveAdminIndex(w, r)
+}
+
+// serveAdminStatic serves static files from the embedded admin directory
+func (s *Server) serveAdminStatic(w http.ResponseWriter, r *http.Request) {
+	// Strip leading slash to get the embedded path
+	filePath := strings.TrimPrefix(r.URL.Path, "/")
+
+	content, err := adminFS.ReadFile(filePath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Set content type based on file extension
+	if strings.HasSuffix(filePath, ".css") {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	} else if strings.HasSuffix(filePath, ".js") {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	}
+
+	// Enable caching for static assets
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Write(content)
+}
+
+// serveAdminIndex serves the admin panel index.html
+func (s *Server) serveAdminIndex(w http.ResponseWriter, r *http.Request) {
+	content, err := adminFS.ReadFile("admin/index.html")
+	if err != nil {
+		// Fallback error message
+		http.Error(w, "Admin panel not found", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(adminPanelHTML))
+	w.Write(content)
+}
+
+// getAdminFS returns the embedded admin filesystem for use in handlers
+func getAdminFS() fs.FS {
+	subFS, _ := fs.Sub(adminFS, "admin")
+	return subFS
 }
 
 // handleAdminIndex serves the modern admin panel
 func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(adminPanelHTML))
+	s.serveAdminIndex(w, r)
 }
 
 // handleAdminIndexOld shows old admin index page (kept for reference)

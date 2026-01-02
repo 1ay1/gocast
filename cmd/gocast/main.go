@@ -52,11 +52,13 @@ func main() {
 	// Print banner
 	printBanner(logger)
 
-	// Load configuration
-	cfg, err := loadConfig(*configFile, logger)
+	// Load configuration with ConfigManager for hybrid config support
+	configManager, err := config.NewConfigManager(*configFile)
 	if err != nil {
 		logger.Fatalf("Failed to load configuration: %v", err)
 	}
+
+	cfg := configManager.GetConfig()
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -68,8 +70,13 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Create and start server
-	srv := server.New(cfg, logger)
+	// Log if there are runtime overrides from state.json
+	if configManager.HasStateOverrides() {
+		logger.Println("Runtime configuration overrides loaded from state.json")
+	}
+
+	// Create and start server with config manager
+	srv := server.NewWithConfigManager(configManager, logger)
 
 	if err := srv.Start(); err != nil {
 		logger.Fatalf("Failed to start server: %v", err)
@@ -92,18 +99,16 @@ func main() {
 		case syscall.SIGHUP:
 			// Reload configuration
 			logger.Println("Received SIGHUP, reloading configuration...")
-			newCfg, err := loadConfig(*configFile, logger)
-			if err != nil {
+			if err := configManager.ReloadBaseConfig(); err != nil {
 				logger.Printf("Failed to reload configuration: %v", err)
 				continue
 			}
+			newCfg := configManager.GetConfig()
 			if err := newCfg.Validate(); err != nil {
 				logger.Printf("Invalid configuration: %v", err)
 				continue
 			}
 			logger.Println("Configuration reloaded successfully")
-			// Note: Full hot-reload would require more complex implementation
-			// For now, suggest restart for changes to take effect
 
 		case syscall.SIGINT, syscall.SIGTERM:
 			logger.Printf("Received %v, shutting down...", sig)

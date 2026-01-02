@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -110,7 +111,8 @@ func (h *Handler) HandleSource(w http.ResponseWriter, r *http.Request) {
 	bufrw.Flush()
 
 	// Now stream from the connection - the client will send audio data
-	h.streamFromReader(bufrw.Reader, mount, mountPath)
+	h.logger.Printf("DEBUG: Starting to stream from source connection for %s", mountPath)
+	h.streamFromConnection(conn, bufrw.Reader, mount, mountPath)
 
 	// Cleanup
 	mount.StopSource()
@@ -398,24 +400,114 @@ func (h *Handler) streamSource(r *http.Request, mount *stream.Mount, mountPath s
 // streamFromReader reads data from a buffered reader and writes to the mount
 func (h *Handler) streamFromReader(reader *bufio.Reader, mount *stream.Mount, mountPath string) {
 	buf := make([]byte, 8192)
+	totalBytes := int64(0)
+	readCount := 0
+
+	h.logger.Printf("DEBUG: streamFromReader started for %s", mountPath)
 
 	for mount.IsActive() {
 		n, err := reader.Read(buf)
+		readCount++
+
+		if readCount <= 5 || readCount%1000 == 0 {
+			h.logger.Printf("DEBUG: Source %s read #%d: %d bytes, err=%v", mountPath, readCount, n, err)
+		}
+
 		if n > 0 {
 			_, writeErr := mount.WriteData(buf[:n])
 			if writeErr != nil {
 				h.logger.Printf("Error writing to mount %s: %v", mountPath, writeErr)
 				return
 			}
+			totalBytes += int64(n)
 		}
 
 		if err != nil {
 			if err != io.EOF {
 				h.logger.Printf("Error reading from SOURCE %s: %v", mountPath, err)
 			}
+			h.logger.Printf("DEBUG: Source %s ended after %d reads, %d total bytes", mountPath, readCount, totalBytes)
 			return
 		}
 	}
+
+	h.logger.Printf("DEBUG: Source %s loop ended (mount inactive), %d total bytes", mountPath, totalBytes)
+}
+
+// streamFromConnection reads data from a hijacked connection and writes to the mount
+// It first drains any buffered data from the bufio.Reader, then reads directly from the connection
+func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, mount *stream.Mount, mountPath string) {
+	buf := make([]byte, 8192)
+	totalBytes := int64(0)
+	readCount := 0
+
+	h.logger.Printf("DEBUG: streamFromConnection started for %s", mountPath)
+
+	// First, drain any buffered data from the bufio.Reader
+	for mount.IsActive() {
+		buffered := bufReader.Buffered()
+		if buffered == 0 {
+			h.logger.Printf("DEBUG: Source %s no more buffered data, switching to direct connection read", mountPath)
+			break
+		}
+
+		toRead := buffered
+		if toRead > len(buf) {
+			toRead = len(buf)
+		}
+
+		n, err := bufReader.Read(buf[:toRead])
+		readCount++
+
+		if readCount <= 5 {
+			h.logger.Printf("DEBUG: Source %s buffered read #%d: %d bytes, err=%v", mountPath, readCount, n, err)
+		}
+
+		if n > 0 {
+			_, writeErr := mount.WriteData(buf[:n])
+			if writeErr != nil {
+				h.logger.Printf("Error writing to mount %s: %v", mountPath, writeErr)
+				return
+			}
+			totalBytes += int64(n)
+		}
+
+		if err != nil {
+			if err != io.EOF {
+				h.logger.Printf("Error reading buffered data from SOURCE %s: %v", mountPath, err)
+			}
+			return
+		}
+	}
+
+	// Now read directly from the connection
+	for mount.IsActive() {
+		n, err := conn.Read(buf)
+		readCount++
+
+		if readCount <= 10 || readCount%1000 == 0 {
+			h.logger.Printf("DEBUG: Source %s direct read #%d: %d bytes, err=%v", mountPath, readCount, n, err)
+		}
+
+		if n > 0 {
+			_, writeErr := mount.WriteData(buf[:n])
+			if writeErr != nil {
+				h.logger.Printf("Error writing to mount %s: %v", mountPath, writeErr)
+				return
+			}
+			totalBytes += int64(n)
+		}
+
+		if err != nil {
+			if err != io.EOF {
+				h.logger.Printf("Error reading from SOURCE %s: %v", mountPath, err)
+			}
+			h.logger.Printf("DEBUG: Source %s ended after %d reads, %d total bytes", mountPath, readCount, totalBytes)
+			return
+		}
+	}
+
+	h.logger.Printf("DEBUG: Source %s loop ended (mount inactive), %d total bytes", mountPath, totalBytes)
 }
 
 // getClientIP extracts the client IP from the request

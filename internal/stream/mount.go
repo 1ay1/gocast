@@ -4,8 +4,6 @@ package stream
 import (
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,38 +71,25 @@ func (m *Metadata) Clone() *Metadata {
 
 // Listener represents a connected listener
 type Listener struct {
-	ID            string
-	IP            string
-	UserAgent     string
-	ConnectedAt   time.Time
-	BytesSent     int64
-	LastActive    time.Time
-	readPos       int64
-	metadataReady bool
-	mount         *Mount
-	done          chan struct{}
-	writer        io.Writer
-	flusher       http.Flusher
+	ID          string
+	IP          string
+	UserAgent   string
+	ConnectedAt time.Time
+	BytesSent   int64
+	LastActive  time.Time
+	done        chan struct{}
 }
 
-// NewListener creates a new listener
-func NewListener(w io.Writer, ip, userAgent string, mount *Mount) *Listener {
-	l := &Listener{
+// NewListener creates a new listener with minimal info
+func NewListener(ip, userAgent string) *Listener {
+	return &Listener{
 		ID:          uuid.New().String(),
 		IP:          ip,
 		UserAgent:   userAgent,
 		ConnectedAt: time.Now(),
 		LastActive:  time.Now(),
-		mount:       mount,
 		done:        make(chan struct{}),
-		writer:      w,
 	}
-
-	if f, ok := w.(http.Flusher); ok {
-		l.flusher = f
-	}
-
-	return l
 }
 
 // Close closes the listener connection
@@ -218,15 +203,16 @@ func (m *Mount) WriteData(data []byte) (int, error) {
 	return n, nil
 }
 
+// CanAddListener checks if a new listener can be added
+func (m *Mount) CanAddListener() bool {
+	count := atomic.LoadInt32(&m.listenerCount)
+	return int(count) < m.Config.MaxListeners
+}
+
 // AddListener adds a new listener
-func (m *Mount) AddListener(l *Listener) error {
+func (m *Mount) AddListener(l *Listener) {
 	m.listenerMu.Lock()
 	defer m.listenerMu.Unlock()
-
-	count := atomic.LoadInt32(&m.listenerCount)
-	if int(count) >= m.Config.MaxListeners {
-		return ErrMaxListeners
-	}
 
 	m.listeners[l.ID] = l
 	newCount := atomic.AddInt32(&m.listenerCount, 1)
@@ -241,18 +227,22 @@ func (m *Mount) AddListener(l *Listener) error {
 			break
 		}
 	}
-
-	// Set initial read position to get burst data
-	l.readPos = m.buffer.WritePos() - int64(m.buffer.BurstSize())
-	if l.readPos < 0 {
-		l.readPos = 0
-	}
-
-	return nil
 }
 
-// RemoveListener removes a listener
-func (m *Mount) RemoveListener(id string) {
+// RemoveListener removes a listener by reference
+func (m *Mount) RemoveListener(l *Listener) {
+	m.listenerMu.Lock()
+	defer m.listenerMu.Unlock()
+
+	if _, exists := m.listeners[l.ID]; exists {
+		l.Close()
+		delete(m.listeners, l.ID)
+		atomic.AddInt32(&m.listenerCount, -1)
+	}
+}
+
+// RemoveListenerByID removes a listener by ID string (for admin API)
+func (m *Mount) RemoveListenerByID(id string) {
 	m.listenerMu.Lock()
 	defer m.listenerMu.Unlock()
 
