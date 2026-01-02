@@ -155,7 +155,7 @@ func DefaultConfig() *Config {
 		},
 		SSL: SSLConfig{
 			Enabled:      false,
-			Port:         443,
+			Port:         8443,
 			AutoSSL:      false,
 			AutoSSLEmail: "",
 			CacheDir:     "",

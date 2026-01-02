@@ -26,7 +26,7 @@
 //	  "ssl": {
 //	    "enabled": true,
 //	    "auto_ssl": true,
-//	    "port": 443
+//	    "port": 8443
 //	  },
 //	  "limits": {
 //	    "max_clients": 500,
@@ -66,23 +66,26 @@ import (
 
 // ConfigManager handles configuration with hot reload support
 type ConfigManager struct {
-	// Current configuration
+	// Current active configuration
 	config *Config
 
-	// File path
+	// Path to config file
 	configPath string
 	dataDir    string
 
-	// Logger
+	// Path to last-known-good backup
+	backupPath string
+
+	// Logger for warnings/errors
 	logger *log.Logger
 
-	// Initial admin password (shown once on first run)
+	// Initial admin password (shown on first run)
 	initialAdminPassword string
 
 	// Mutex for thread-safe access
 	mu sync.RWMutex
 
-	// Callbacks for config change notifications
+	// Change callbacks for hot-reload
 	changeCallbacks []func(*Config)
 }
 
@@ -103,9 +106,11 @@ func NewConfigManager(dataDir string, logger *log.Logger) (*ConfigManager, error
 	}
 
 	configPath := filepath.Join(dataDir, "config.json")
+	backupPath := filepath.Join(dataDir, "config.json.backup")
 
 	cm := &ConfigManager{
 		configPath:      configPath,
+		backupPath:      backupPath,
 		dataDir:         dataDir,
 		config:          DefaultConfig(),
 		changeCallbacks: make([]func(*Config), 0),
@@ -123,8 +128,20 @@ func NewConfigManager(dataDir string, logger *log.Logger) (*ConfigManager, error
 	} else {
 		// Load existing config
 		if err := cm.load(); err != nil {
-			logger.Printf("WARNING: Failed to load config, using defaults: %v", err)
-			cm.config = DefaultConfig()
+			logger.Printf("WARNING: Failed to load config: %v", err)
+
+			// Try to recover from backup
+			if cm.tryRecoverFromBackup() {
+				logger.Println("Successfully recovered config from backup")
+			} else {
+				logger.Println("No backup available, using defaults")
+				cm.config = cm.createInitialConfig()
+				// Save the default config to replace the corrupted one
+				if err := cm.save(); err != nil {
+					logger.Printf("WARNING: Failed to save default config: %v", err)
+				}
+				cm.showFirstRunCredentials()
+			}
 		}
 	}
 
@@ -241,7 +258,10 @@ func (cm *ConfigManager) load() error {
 	}
 
 	// Validate and fix any issues
-	cm.validateAndFix(cfg)
+	warnings := cm.validateAndFix(cfg)
+	for _, w := range warnings {
+		cm.logger.Printf("CONFIG WARNING: %s", w)
+	}
 
 	// Convert seconds to durations
 	cfg.normalizeDurations()
@@ -253,6 +273,51 @@ func (cm *ConfigManager) load() error {
 
 	cm.config = cfg
 	return nil
+}
+
+// tryRecoverFromBackup attempts to load config from the backup file
+func (cm *ConfigManager) tryRecoverFromBackup() bool {
+	if _, err := os.Stat(cm.backupPath); os.IsNotExist(err) {
+		return false
+	}
+
+	data, err := os.ReadFile(cm.backupPath)
+	if err != nil {
+		cm.logger.Printf("Failed to read backup file: %v", err)
+		return false
+	}
+
+	cfg := DefaultConfig()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		cm.logger.Printf("Backup file is also corrupted: %v", err)
+		return false
+	}
+
+	// Validate and fix
+	cm.validateAndFix(cfg)
+	cfg.normalizeDurations()
+
+	if cfg.Mounts == nil {
+		cfg.Mounts = make(map[string]*MountConfig)
+	}
+
+	cm.config = cfg
+
+	// Save the recovered config as the main config
+	if err := cm.saveUnlocked(); err != nil {
+		cm.logger.Printf("Failed to save recovered config: %v", err)
+	}
+
+	return true
+}
+
+// saveBackup saves a copy of the current config as a backup
+func (cm *ConfigManager) saveBackup() error {
+	data, err := json.MarshalIndent(cm.config, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cm.backupPath, data, 0600)
 }
 
 // save persists configuration to disk (requires lock held)
@@ -280,6 +345,13 @@ func (cm *ConfigManager) saveUnlocked() error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
+	// Save a backup of current config before overwriting (if file exists)
+	if _, err := os.Stat(cm.configPath); err == nil {
+		if err := cm.saveBackup(); err != nil {
+			cm.logger.Printf("WARNING: Failed to save config backup: %v", err)
+		}
+	}
+
 	// Atomic write: write to temp file then rename
 	tempPath := cm.configPath + ".tmp"
 	if err := os.WriteFile(tempPath, data, 0600); err != nil {
@@ -296,66 +368,201 @@ func (cm *ConfigManager) saveUnlocked() error {
 
 // backupCorruptedConfig creates a backup of a corrupted config file
 func (cm *ConfigManager) backupCorruptedConfig(data []byte) {
-	backupPath := cm.configPath + ".corrupted." + time.Now().Format("20060102-150405")
-	if err := os.WriteFile(backupPath, data, 0600); err != nil {
+	corruptedPath := cm.configPath + ".corrupted." + time.Now().Format("20060102-150405")
+	if err := os.WriteFile(corruptedPath, data, 0600); err != nil {
 		cm.logger.Printf("WARNING: Failed to backup corrupted config: %v", err)
 	} else {
-		cm.logger.Printf("Corrupted config backed up to: %s", backupPath)
+		cm.logger.Printf("Corrupted config backed up to: %s", corruptedPath)
 	}
 }
 
 // validateAndFix validates configuration and fixes any issues
-func (cm *ConfigManager) validateAndFix(cfg *Config) {
+// Returns a list of warnings for issues that were auto-fixed
+func (cm *ConfigManager) validateAndFix(cfg *Config) []string {
+	var warnings []string
+
 	// Fix invalid limits
 	if cfg.Limits.MaxClients <= 0 {
-		cm.logger.Println("WARNING: Invalid max_clients, setting to 100")
+		warnings = append(warnings, "Invalid max_clients, setting to 100")
 		cfg.Limits.MaxClients = 100
 	}
+	if cfg.Limits.MaxClients > 100000 {
+		warnings = append(warnings, "max_clients too high, capping at 100000")
+		cfg.Limits.MaxClients = 100000
+	}
 	if cfg.Limits.MaxSources <= 0 {
-		cm.logger.Println("WARNING: Invalid max_sources, setting to 10")
+		warnings = append(warnings, "Invalid max_sources, setting to 10")
 		cfg.Limits.MaxSources = 10
 	}
+	if cfg.Limits.MaxSources > 1000 {
+		warnings = append(warnings, "max_sources too high, capping at 1000")
+		cfg.Limits.MaxSources = 1000
+	}
+	if cfg.Limits.MaxListenersPerMount <= 0 {
+		warnings = append(warnings, "Invalid max_listeners_per_mount, setting to 100")
+		cfg.Limits.MaxListenersPerMount = 100
+	}
 	if cfg.Limits.QueueSize < 1024 {
-		cm.logger.Println("WARNING: queue_size too small, setting to 1024")
+		warnings = append(warnings, "queue_size too small, setting to 1024")
 		cfg.Limits.QueueSize = 1024
+	}
+	if cfg.Limits.QueueSize > 10*1024*1024 {
+		warnings = append(warnings, "queue_size too large (>10MB), capping at 10MB")
+		cfg.Limits.QueueSize = 10 * 1024 * 1024
+	}
+	if cfg.Limits.BurstSize < 0 {
+		warnings = append(warnings, "Invalid burst_size, setting to 2048")
+		cfg.Limits.BurstSize = 2048
+	}
+
+	// Fix invalid timeouts
+	if cfg.Limits.ClientTimeoutSeconds <= 0 {
+		cfg.Limits.ClientTimeoutSeconds = 30
+	}
+	if cfg.Limits.ClientTimeoutSeconds > 3600 {
+		warnings = append(warnings, "client_timeout too high, capping at 3600s")
+		cfg.Limits.ClientTimeoutSeconds = 3600
+	}
+	if cfg.Limits.HeaderTimeoutSeconds <= 0 {
+		cfg.Limits.HeaderTimeoutSeconds = 5
+	}
+	if cfg.Limits.SourceTimeoutSeconds <= 0 {
+		cfg.Limits.SourceTimeoutSeconds = 5
 	}
 
 	// Fix invalid ports
 	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
-		cm.logger.Println("WARNING: Invalid server port, setting to 8000")
+		warnings = append(warnings, "Invalid server port, setting to 8000")
 		cfg.Server.Port = 8000
 	}
 	if cfg.SSL.Port <= 0 || cfg.SSL.Port > 65535 {
-		cm.logger.Println("WARNING: Invalid SSL port, setting to 443")
-		cfg.SSL.Port = 443
+		warnings = append(warnings, "Invalid SSL port, setting to 8443")
+		cfg.SSL.Port = 8443
+	}
+
+	// Fix missing server settings
+	if cfg.Server.ListenAddress == "" {
+		cfg.Server.ListenAddress = "0.0.0.0"
+	}
+	if cfg.Server.Hostname == "" {
+		cfg.Server.Hostname = "localhost"
+	}
+	if cfg.Server.AdminRoot == "" {
+		cfg.Server.AdminRoot = "/admin"
 	}
 
 	// Fix missing auth
 	if cfg.Auth.AdminUser == "" {
+		warnings = append(warnings, "No admin username, setting to 'admin'")
 		cfg.Auth.AdminUser = "admin"
 	}
 	if cfg.Auth.AdminPassword == "" {
-		cfg.Auth.AdminPassword = generateSecurePassword(16)
-		cm.logger.Printf("WARNING: No admin password set, generated: %s", cfg.Auth.AdminPassword)
+		newPass := generateSecurePassword(16)
+		warnings = append(warnings, fmt.Sprintf("No admin password set, generated: %s", newPass))
+		cfg.Auth.AdminPassword = newPass
+	}
+	if cfg.Auth.SourcePassword == "" {
+		newPass := generateSecurePassword(12)
+		warnings = append(warnings, fmt.Sprintf("No source password set, generated: %s", newPass))
+		cfg.Auth.SourcePassword = newPass
 	}
 
 	// Sync admin config
 	cfg.Admin.User = cfg.Auth.AdminUser
 	cfg.Admin.Password = cfg.Auth.AdminPassword
 
+	// Validate and fix mount configurations
+	for path, mount := range cfg.Mounts {
+		mountWarnings := cm.validateMount(path, mount)
+		warnings = append(warnings, mountWarnings...)
+	}
+
 	// Ensure version is set
 	if cfg.Version == 0 {
 		cfg.Version = 1
 	}
+
+	// Validate logging
+	validLogLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
+	if !validLogLevels[cfg.Logging.LogLevel] {
+		warnings = append(warnings, fmt.Sprintf("Invalid log_level '%s', setting to 'info'", cfg.Logging.LogLevel))
+		cfg.Logging.LogLevel = "info"
+	}
+	if cfg.Logging.LogSize <= 0 {
+		cfg.Logging.LogSize = 10000
+	}
+
+	// Validate directory settings
+	if cfg.Directory.IntervalSeconds < 60 && cfg.Directory.Enabled {
+		warnings = append(warnings, "Directory interval too short, setting to 60s minimum")
+		cfg.Directory.IntervalSeconds = 60
+	}
+
+	return warnings
+}
+
+// validateMount validates a single mount configuration and fixes issues
+func (cm *ConfigManager) validateMount(path string, mount *MountConfig) []string {
+	var warnings []string
+
+	if mount == nil {
+		return warnings
+	}
+
+	// Fix mount name
+	if mount.Name == "" {
+		mount.Name = path
+	}
+
+	// Fix invalid max_listeners
+	if mount.MaxListeners <= 0 {
+		warnings = append(warnings, fmt.Sprintf("Mount %s: invalid max_listeners, setting to 100", path))
+		mount.MaxListeners = 100
+	}
+	if mount.MaxListeners > 100000 {
+		warnings = append(warnings, fmt.Sprintf("Mount %s: max_listeners too high, capping at 100000", path))
+		mount.MaxListeners = 100000
+	}
+
+	// Fix invalid bitrate
+	if mount.Bitrate < 0 {
+		mount.Bitrate = 128
+	}
+	if mount.Bitrate > 10000 {
+		warnings = append(warnings, fmt.Sprintf("Mount %s: bitrate suspiciously high (%d), capping at 10000", path, mount.Bitrate))
+		mount.Bitrate = 10000
+	}
+
+	// Fix content type
+	if mount.Type == "" {
+		mount.Type = "audio/mpeg"
+	}
+
+	// Fix burst size
+	if mount.BurstSize < 0 {
+		mount.BurstSize = 2048
+	}
+	if mount.BurstSize > 1024*1024 {
+		warnings = append(warnings, fmt.Sprintf("Mount %s: burst_size too large (>1MB), capping at 1MB", path))
+		mount.BurstSize = 1024 * 1024
+	}
+
+	return warnings
 }
 
 // Reload reloads configuration from disk (hot reload)
+// This is a safe reload - if the new config is invalid, the old config is kept
 func (cm *ConfigManager) Reload() error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
+	// Save current config as backup before attempting reload
+	oldConfig := cm.config.Clone()
+
 	if err := cm.load(); err != nil {
-		return err
+		// Restore old config on failure
+		cm.config = oldConfig
+		return fmt.Errorf("reload failed (keeping previous config): %w", err)
 	}
 
 	cm.notifyChange()
@@ -464,7 +671,7 @@ func (cm *ConfigManager) EnableAutoSSL(hostname, email string) error {
 	cm.config.Server.Hostname = hostname
 	cm.config.SSL.Enabled = true
 	cm.config.SSL.AutoSSL = true
-	cm.config.SSL.Port = 443
+	cm.config.SSL.Port = 8443
 	cm.config.SSL.AutoSSLEmail = email
 	cm.config.SSL.CacheDir = filepath.Join(cm.dataDir, "certs")
 

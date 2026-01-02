@@ -317,7 +317,7 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 	// Start HTTP server on port 80 for ACME challenges + redirect to HTTPS
 	sslPort := s.config.SSL.Port
 	if sslPort == 0 {
-		sslPort = 443
+		sslPort = 8443
 	}
 	s.httpChallenge = autoSSL.StartHTTPChallengeServer(sslPort)
 

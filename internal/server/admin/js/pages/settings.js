@@ -255,11 +255,19 @@ const SettingsPage = {
     const isEnabled = ssl.enabled || false;
     const hostname = ssl.hostname || server.hostname || "localhost";
     const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
+    const sslPort = ssl.port || 8443;
+
     return `
             <div class="card">
                 <div class="card-header">
                     <h3 class="card-title">🔒 SSL / HTTPS Settings</h3>
-                    ${isEnabled ? '<span class="badge badge-success">SSL Enabled</span>' : '<span class="badge badge-neutral">SSL Disabled</span>'}
+                    ${
+                      isEnabled
+                        ? isAutoSSL
+                          ? '<span class="badge badge-success">AutoSSL Active</span>'
+                          : '<span class="badge badge-success">SSL Enabled</span>'
+                        : '<span class="badge badge-neutral">SSL Disabled</span>'
+                    }
                 </div>
                 <div class="card-body">
                     ${
@@ -267,7 +275,19 @@ const SettingsPage = {
                         ? `
                     <div class="alert alert-warning mb-3">
                         <strong>⚠️ Localhost Detected</strong><br>
-                        AutoSSL requires a public domain name. Change the hostname in Server settings first.
+                        AutoSSL requires a public domain name. Go to <strong>Server</strong> tab and set a valid hostname first (e.g., radio.example.com).
+                    </div>
+                    `
+                        : ""
+                    }
+
+                    ${
+                      isEnabled && isAutoSSL
+                        ? `
+                    <div class="alert alert-success mb-3">
+                        <strong>✅ AutoSSL is Active</strong><br>
+                        Your server is secured with a Let's Encrypt certificate for <strong>${UI.escapeHtml(hostname)}</strong>.<br>
+                        HTTPS URL: <a href="https://${UI.escapeHtml(hostname)}:${sslPort}" target="_blank">https://${UI.escapeHtml(hostname)}:${sslPort}</a>
                     </div>
                     `
                         : ""
@@ -276,54 +296,70 @@ const SettingsPage = {
                     <div class="card mb-3" style="background: var(--bg-tertiary);">
                         <div class="card-body">
                             <h4 style="margin-top: 0;">🚀 One-Click AutoSSL (Recommended)</h4>
-                            <p class="text-muted">Automatically obtain and renew SSL certificates from Let's Encrypt.</p>
+                            <p class="text-muted">Automatically obtain and renew free SSL certificates from Let's Encrypt. No manual certificate management needed!</p>
 
                             <div class="form-row">
                                 <div class="form-group" style="flex: 2;">
-                                    <label class="form-label">Domain Name</label>
+                                    <label class="form-label">Domain Name *</label>
                                     <input type="text"
                                            id="sslHostname"
                                            class="form-input"
                                            value="${UI.escapeHtml(hostname)}"
                                            placeholder="radio.example.com"
                                            ${isLocalhost ? "disabled" : ""}>
-                                    <span class="form-hint">Must be a valid public domain pointing to this server</span>
+                                    <span class="form-hint">Your public domain pointing to this server (DNS must be configured)</span>
                                 </div>
                                 <div class="form-group" style="flex: 1;">
-                                    <label class="form-label">Email (optional)</label>
+                                    <label class="form-label">Email (recommended)</label>
                                     <input type="email"
                                            id="sslEmail"
                                            class="form-input"
                                            value="${UI.escapeHtml(ssl.auto_ssl_email || "")}"
                                            placeholder="admin@example.com">
-                                    <span class="form-hint">For certificate expiry notifications</span>
+                                    <span class="form-hint">Get notified before certificate expires</span>
                                 </div>
                             </div>
 
-                            <div class="flex gap-2 mt-2">
+                            <div class="flex gap-2 mt-2 items-center">
                                 ${
                                   isAutoSSL
                                     ? `
                                 <button class="btn btn-danger" onclick="SettingsPage.disableSSL()">
                                     🔓 Disable SSL
                                 </button>
-                                <span class="text-success" style="align-self: center;">✓ AutoSSL is active</span>
+                                <span class="text-success">✓ AutoSSL is active on port ${sslPort}</span>
                                 `
                                     : `
                                 <button class="btn btn-primary" onclick="SettingsPage.enableAutoSSL()" ${isLocalhost ? "disabled" : ""}>
                                     🔒 Enable AutoSSL
                                 </button>
+                                ${isLocalhost ? '<span class="text-muted">Set a public hostname first</span>' : '<span class="text-muted">Will listen on port 8443</span>'}
                                 `
                                 }
                             </div>
+
+                            ${
+                              !isAutoSSL && !isLocalhost
+                                ? `
+                            <div class="alert alert-info mt-3" style="margin-bottom: 0;">
+                                <strong>📋 Before enabling AutoSSL:</strong>
+                                <ol style="margin: 8px 0 0 20px; padding: 0;">
+                                    <li>Point your domain's DNS to this server's IP address</li>
+                                    <li>Ensure port 80 is accessible (for Let's Encrypt verification)</li>
+                                    <li>Ensure port 8443 is accessible (for HTTPS traffic)</li>
+                                </ol>
+                            </div>
+                            `
+                                : ""
+                            }
                         </div>
                     </div>
 
                     <details class="mb-3">
-                        <summary style="cursor: pointer; font-weight: 600;">📜 Manual SSL Configuration</summary>
+                        <summary style="cursor: pointer; font-weight: 600;">📜 Manual SSL Configuration (Advanced)</summary>
                         <div class="card mt-2" style="background: var(--bg-tertiary);">
                             <div class="card-body">
-                                <p class="text-muted">Use your own SSL certificates instead of AutoSSL.</p>
+                                <p class="text-muted">Use your own SSL certificates (e.g., from a commercial CA or self-signed).</p>
 
                                 <div class="form-row">
                                     <div class="form-group">
@@ -331,32 +367,31 @@ const SettingsPage = {
                                         <input type="number"
                                                id="sslPort"
                                                class="form-input"
-                                               value="${ssl.port || 443}"
+                                               value="${sslPort}"
                                                min="1"
                                                max="65535">
+                                        <span class="form-hint">Default: 8443 (use 443 if you have root access)</span>
                                     </div>
                                 </div>
 
-                                <div class="form-row">
-                                    <div class="form-group">
-                                        <label class="form-label">Certificate Path</label>
-                                        <input type="text"
-                                               id="sslCertPath"
-                                               class="form-input"
-                                               value="${UI.escapeHtml(ssl.cert_path || "")}"
-                                               placeholder="/etc/letsencrypt/live/example.com/fullchain.pem">
-                                    </div>
+                                <div class="form-group">
+                                    <label class="form-label">Certificate Path (fullchain.pem)</label>
+                                    <input type="text"
+                                           id="sslCertPath"
+                                           class="form-input"
+                                           value="${UI.escapeHtml(ssl.cert_path || "")}"
+                                           placeholder="/etc/ssl/certs/server.crt">
+                                    <span class="form-hint">Full path to your SSL certificate file</span>
                                 </div>
 
-                                <div class="form-row">
-                                    <div class="form-group">
-                                        <label class="form-label">Private Key Path</label>
-                                        <input type="text"
-                                               id="sslKeyPath"
-                                               class="form-input"
-                                               value="${UI.escapeHtml(ssl.key_path || "")}"
-                                               placeholder="/etc/letsencrypt/live/example.com/privkey.pem">
-                                    </div>
+                                <div class="form-group">
+                                    <label class="form-label">Private Key Path (privkey.pem)</label>
+                                    <input type="text"
+                                           id="sslKeyPath"
+                                           class="form-input"
+                                           value="${UI.escapeHtml(ssl.key_path || "")}"
+                                           placeholder="/etc/ssl/private/server.key">
+                                    <span class="form-hint">Full path to your SSL private key file</span>
                                 </div>
 
                                 <button class="btn btn-secondary" onclick="SettingsPage.saveManualSSL()">
@@ -367,7 +402,8 @@ const SettingsPage = {
                     </details>
 
                     <div class="alert alert-info">
-                        <strong>ℹ️ Note:</strong> SSL changes require a server restart to take effect.
+                        <strong>ℹ️ Note:</strong> After enabling SSL, restart GoCast for changes to take effect.
+                        Your streams will be available at both HTTP and HTTPS URLs.
                     </div>
                 </div>
             </div>
@@ -951,7 +987,7 @@ const SettingsPage = {
     }
 
     const confirmed = await UI.confirm(
-      `Enable AutoSSL for ${hostname}?\n\nThis will:\n• Obtain a free SSL certificate from Let's Encrypt\n• Automatically renew the certificate\n• Require a server restart to take effect`,
+      `Enable AutoSSL for ${hostname}?\n\nThis will:\n• Obtain a free SSL certificate from Let's Encrypt\n• Automatically renew the certificate\n• Listen on HTTPS port 8443\n• Require a server restart to take effect\n\nMake sure port 80 and 8443 are accessible from the internet.`,
       {
         title: "Enable AutoSSL",
         confirmText: "Enable SSL",
@@ -964,7 +1000,7 @@ const SettingsPage = {
     try {
       await API.post("/config/ssl/enable", { hostname, email });
       UI.success(
-        "AutoSSL enabled! Restart the server to obtain the certificate.",
+        "AutoSSL enabled! Restart the server to start HTTPS on port 8443.",
       );
       await this.loadConfig();
     } catch (err) {
@@ -1000,7 +1036,7 @@ const SettingsPage = {
    * Save manual SSL settings
    */
   async saveManualSSL() {
-    const port = parseInt(UI.$("sslPort")?.value) || 443;
+    const port = parseInt(UI.$("sslPort")?.value) || 8443;
     const certPath = UI.$("sslCertPath")?.value?.trim();
     const keyPath = UI.$("sslKeyPath")?.value?.trim();
 

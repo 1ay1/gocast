@@ -752,9 +752,16 @@ func (s *Server) handleUpdateMountConfig(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Get existing mount to preserve password if not provided
+	existingMount := s.configManager.GetMount(mountPath)
+	password := dto.Password
+	if password == "" && existingMount != nil {
+		password = existingMount.Password
+	}
+
 	mount := &config.MountConfig{
 		Name:         mountPath,
-		Password:     dto.Password,
+		Password:     password,
 		MaxListeners: dto.MaxListeners,
 		Genre:        dto.Genre,
 		Description:  dto.Description,
