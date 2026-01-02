@@ -1,4 +1,5 @@
 // Package stream handles audio stream management and distribution
+// High-performance, lock-free ring buffer optimized for live streaming
 package stream
 
 import (
@@ -7,140 +8,175 @@ import (
 	"time"
 )
 
-// Buffer is a ring buffer for streaming audio data to multiple listeners
-// Optimized for low latency streaming with synchronized listener positions
+// Buffer is a high-performance ring buffer for streaming audio data
+// Design goals:
+// - Lock-free reads for maximum throughput
+// - Atomic write position updates
+// - Broadcast notifications for waiting listeners
+// - Graceful handling of buffer wraparound
 type Buffer struct {
-	data       []byte
-	size       int
-	writePos   int64
-	mu         sync.RWMutex
-	burstSize  int
-	created    time.Time
-	bytesTotal int64
+	// Core buffer data - never reallocated after creation
+	data []byte
+	size int64 // Use int64 to avoid conversions
+	mask int64 // size - 1 for fast modulo (requires power of 2 size)
 
-	// Listener synchronization
-	listeners   map[*int64]struct{} // Track listener positions
-	listenersMu sync.RWMutex
-	notifyChan  chan struct{}
-	notifyMu    sync.Mutex
+	// Write position - updated atomically
+	writePos atomic.Int64
+
+	// Write lock - only one writer at a time
+	writeMu sync.Mutex
+
+	// Notification for waiting readers
+	notify     chan struct{}
+	notifyOnce sync.Once
+
+	// Configuration
+	burstSize int
+
+	// Stats
+	bytesTotal atomic.Int64
+	created    time.Time
 }
 
-// NewBuffer creates a new stream buffer with the specified size
-// Ultra-low latency defaults:
-// - Tiny burst (2KB) for instant playback start
-// - Smaller buffer (128KB) for minimum latency
+// NewBuffer creates a new stream buffer
+// Size is rounded up to nearest power of 2 for fast modulo operations
 func NewBuffer(size int, burstSize int) *Buffer {
+	// Default sizes optimized for 320kbps streaming
 	if size <= 0 {
-		size = 131072 // 128KB default - ~4 seconds at 256kbps
+		size = 262144 // 256KB = ~6.5 seconds at 320kbps
 	}
 	if burstSize <= 0 {
-		burstSize = 2048 // 2KB burst - ~50ms at 320kbps for instant start
-	}
-	if burstSize > size {
-		burstSize = size
+		burstSize = 8192 // 8KB = ~200ms at 320kbps
 	}
 
-	return &Buffer{
-		data:       make([]byte, size),
-		size:       size,
-		writePos:   0,
-		burstSize:  burstSize,
-		created:    time.Now(),
-		listeners:  make(map[*int64]struct{}),
-		notifyChan: make(chan struct{}, 1),
+	// Round up to power of 2 for fast modulo
+	size = nextPowerOf2(size)
+
+	if burstSize > size {
+		burstSize = size / 4
 	}
+
+	b := &Buffer{
+		data:      make([]byte, size),
+		size:      int64(size),
+		mask:      int64(size - 1),
+		burstSize: burstSize,
+		notify:    make(chan struct{}, 1),
+		created:   time.Now(),
+	}
+
+	return b
 }
 
-// Write writes data to the buffer
-// Optimized: batch copy instead of byte-by-byte
-func (b *Buffer) Write(p []byte) (n int, err error) {
+// Write writes data to the buffer (thread-safe, single writer)
+func (b *Buffer) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
 
-	b.mu.Lock()
-	n = len(p)
+	b.writeMu.Lock()
 
-	// Optimized: copy in chunks instead of byte-by-byte
-	startPos := b.writePos % int64(b.size)
+	writePos := b.writePos.Load()
+	n := len(p)
 
-	if int(startPos)+n <= b.size {
-		// Fast path: single copy
-		copy(b.data[startPos:], p)
+	// Write data to ring buffer
+	startIdx := writePos & b.mask
+
+	if startIdx+int64(n) <= b.size {
+		// Fast path: single contiguous write
+		copy(b.data[startIdx:], p)
 	} else {
 		// Wrap around: two copies
-		firstPart := b.size - int(startPos)
-		copy(b.data[startPos:], p[:firstPart])
+		firstPart := int(b.size - startIdx)
+		copy(b.data[startIdx:], p[:firstPart])
 		copy(b.data[0:], p[firstPart:])
 	}
 
-	b.writePos += int64(n)
-	atomic.AddInt64(&b.bytesTotal, int64(n))
-	b.mu.Unlock()
+	// Update write position atomically
+	b.writePos.Store(writePos + int64(n))
+	b.bytesTotal.Add(int64(n))
 
-	// Non-blocking notify
-	b.notifyMu.Lock()
+	b.writeMu.Unlock()
+
+	// Non-blocking notification to waiting readers
 	select {
-	case b.notifyChan <- struct{}{}:
+	case b.notify <- struct{}{}:
 	default:
+		// Channel full, readers will poll
 	}
-	b.notifyMu.Unlock()
 
 	return n, nil
 }
 
-// WritePos returns the current write position
+// WritePos returns the current write position (lock-free)
 func (b *Buffer) WritePos() int64 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.writePos
+	return b.writePos.Load()
 }
 
-// GetBurst returns minimal burst data for instant listener start
-// Ultra-low latency: only returns tiny amount to prime player buffer
-func (b *Buffer) GetBurst() []byte {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	if b.writePos == 0 {
-		return nil
-	}
-
-	burstBytes := b.burstSize
-	if b.writePos < int64(burstBytes) {
-		burstBytes = int(b.writePos)
-	}
-
-	result := make([]byte, burstBytes)
-	startPos := b.writePos - int64(burstBytes)
-
-	// Optimized: batch copy
-	readStart := int(startPos % int64(b.size))
-	if readStart+burstBytes <= b.size {
-		copy(result, b.data[readStart:readStart+burstBytes])
-	} else {
-		firstPart := b.size - readStart
-		copy(result[:firstPart], b.data[readStart:])
-		copy(result[firstPart:], b.data[:burstBytes-firstPart])
-	}
-
-	return result
-}
-
-// ReadFrom reads data from the buffer starting at the given position
-// Returns the data and the new position
-// Optimized: smaller max read size for lower latency
+// ReadFrom reads data from buffer starting at pos (lock-free for readers)
+// Returns data slice and new position
+// If pos is behind (data overwritten), jumps to oldest available data
+// If pos is ahead of write position, returns nil
 func (b *Buffer) ReadFrom(pos int64, maxBytes int) ([]byte, int64) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	writePos := b.writePos.Load()
 
-	// Check if position is valid
-	if pos >= b.writePos {
+	// Nothing to read if at or ahead of write position
+	if pos >= writePos {
 		return nil, pos
 	}
 
-	// Check if position is too old (data overwritten)
-	oldestPos := b.writePos - int64(b.size)
+	// Check if requested position has been overwritten
+	oldestPos := writePos - b.size
+	if oldestPos < 0 {
+		oldestPos = 0
+	}
+	if pos < oldestPos {
+		// Data was overwritten, jump to oldest available
+		pos = oldestPos
+	}
+
+	// Calculate available bytes
+	available := int(writePos - pos)
+	if available > maxBytes {
+		available = maxBytes
+	}
+	if available <= 0 {
+		return nil, pos
+	}
+
+	// Allocate result buffer
+	result := make([]byte, available)
+
+	// Read from ring buffer
+	startIdx := pos & b.mask
+
+	if startIdx+int64(available) <= b.size {
+		// Fast path: single contiguous read
+		copy(result, b.data[startIdx:startIdx+int64(available)])
+	} else {
+		// Wrap around: two copies
+		firstPart := int(b.size - startIdx)
+		copy(result[:firstPart], b.data[startIdx:])
+		copy(result[firstPart:], b.data[:available-firstPart])
+	}
+
+	return result, pos + int64(available)
+}
+
+// ReadFromInto reads data into provided buffer (zero-allocation read)
+// Returns number of bytes read and new position
+func (b *Buffer) ReadFromInto(pos int64, buf []byte) (int, int64) {
+	if len(buf) == 0 {
+		return 0, pos
+	}
+
+	writePos := b.writePos.Load()
+
+	if pos >= writePos {
+		return 0, pos
+	}
+
+	oldestPos := writePos - b.size
 	if oldestPos < 0 {
 		oldestPos = 0
 	}
@@ -148,136 +184,143 @@ func (b *Buffer) ReadFrom(pos int64, maxBytes int) ([]byte, int64) {
 		pos = oldestPos
 	}
 
-	// Calculate how much data is available
-	available := int(b.writePos - pos)
-	if available > maxBytes {
-		available = maxBytes
+	available := int(writePos - pos)
+	if available > len(buf) {
+		available = len(buf)
 	}
-
 	if available <= 0 {
-		return nil, pos
+		return 0, pos
 	}
 
-	result := make([]byte, available)
-	readStart := int(pos % int64(b.size))
+	startIdx := pos & b.mask
 
-	// Optimized: batch copy
-	if readStart+available <= b.size {
-		copy(result, b.data[readStart:readStart+available])
+	if startIdx+int64(available) <= b.size {
+		copy(buf[:available], b.data[startIdx:])
 	} else {
-		firstPart := b.size - readStart
-		copy(result[:firstPart], b.data[readStart:])
-		copy(result[firstPart:], b.data[:available-firstPart])
+		firstPart := int(b.size - startIdx)
+		copy(buf[:firstPart], b.data[startIdx:])
+		copy(buf[firstPart:available], b.data[:available-firstPart])
 	}
 
-	return result, pos + int64(available)
+	return available, pos + int64(available)
 }
 
-// ReadFromSync reads from a synchronized position for listener sync
-// All listeners calling this will get data from approximately the same position
-func (b *Buffer) ReadFromSync(maxBytes int) ([]byte, int64) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+// GetBurst returns burst data for new listener
+func (b *Buffer) GetBurst() []byte {
+	writePos := b.writePos.Load()
 
-	if b.writePos == 0 {
-		return nil, 0
+	if writePos == 0 {
+		return nil
 	}
 
-	// Read from a position that's slightly behind write position
-	// This keeps all listeners synced to the same point
-	lagBytes := int64(b.burstSize / 2) // Half burst behind for sync
-	pos := b.writePos - lagBytes
-	if pos < 0 {
-		pos = 0
+	burstBytes := int64(b.burstSize)
+	if writePos < burstBytes {
+		burstBytes = writePos
 	}
 
-	available := int(b.writePos - pos)
-	if available > maxBytes {
-		available = maxBytes
-	}
+	startPos := writePos - burstBytes
+	result := make([]byte, burstBytes)
 
-	if available <= 0 {
-		return nil, b.writePos
-	}
+	startIdx := startPos & b.mask
 
-	result := make([]byte, available)
-	readStart := int(pos % int64(b.size))
-
-	if readStart+available <= b.size {
-		copy(result, b.data[readStart:readStart+available])
+	if startIdx+burstBytes <= b.size {
+		copy(result, b.data[startIdx:])
 	} else {
-		firstPart := b.size - readStart
-		copy(result[:firstPart], b.data[readStart:])
-		copy(result[firstPart:], b.data[:available-firstPart])
+		firstPart := int(b.size - startIdx)
+		copy(result[:firstPart], b.data[startIdx:])
+		copy(result[firstPart:], b.data[:int(burstBytes)-firstPart])
 	}
 
-	return result, pos + int64(available)
+	return result
 }
 
-// GetLivePosition returns position at the live edge for instant playback
-// Ultra-low latency: start as close to live as possible
+// GetLivePosition returns position for live-edge listening
 func (b *Buffer) GetLivePosition() int64 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	writePos := b.writePos.Load()
 
-	// Start at live edge minus tiny buffer (512 bytes = ~12ms at 320kbps)
-	// This is the minimum needed to avoid buffer underrun
-	lagBytes := int64(512)
-	pos := b.writePos - lagBytes
+	// Small lag to prevent underrun (1KB = ~25ms at 320kbps)
+	lag := int64(1024)
+	pos := writePos - lag
 	if pos < 0 {
 		pos = 0
 	}
 	return pos
 }
 
-// NotifyChan returns the notification channel for new data
+// WaitForData waits for new data with timeout
+// Returns true if data is available, false on timeout
+func (b *Buffer) WaitForData(pos int64, timeout time.Duration) bool {
+	// Check if data already available
+	if b.writePos.Load() > pos {
+		return true
+	}
+
+	// Wait for notification or timeout
+	select {
+	case <-b.notify:
+		return b.writePos.Load() > pos
+	case <-time.After(timeout):
+		return b.writePos.Load() > pos
+	}
+}
+
+// NotifyChan returns the notification channel
 func (b *Buffer) NotifyChan() <-chan struct{} {
-	return b.notifyChan
+	return b.notify
 }
 
-// BytesTotal returns the total number of bytes written
+// BytesTotal returns total bytes written
 func (b *Buffer) BytesTotal() int64 {
-	return atomic.LoadInt64(&b.bytesTotal)
+	return b.bytesTotal.Load()
 }
 
-// Size returns the buffer size
+// Size returns buffer size
 func (b *Buffer) Size() int {
-	return b.size
+	return int(b.size)
 }
 
-// BurstSize returns the burst size
+// BurstSize returns burst size
 func (b *Buffer) BurstSize() int {
 	return b.burstSize
 }
 
-// Created returns when the buffer was created
+// Created returns creation time
 func (b *Buffer) Created() time.Time {
 	return b.created
 }
 
-// Reset resets the buffer
+// Reset resets the buffer for reuse
 func (b *Buffer) Reset() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	b.writePos = 0
-	b.bytesTotal = 0
+	b.writeMu.Lock()
+	b.writePos.Store(0)
+	b.bytesTotal.Store(0)
 	b.created = time.Now()
+	b.writeMu.Unlock()
 
-	// Reset notify channel
-	b.notifyMu.Lock()
+	// Drain notification channel
 	select {
-	case <-b.notifyChan:
+	case <-b.notify:
 	default:
 	}
-	b.notifyMu.Unlock()
 }
 
-// SetBurstSize allows runtime adjustment of burst size
+// SetBurstSize updates burst size
 func (b *Buffer) SetBurstSize(size int) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if size > 0 && size <= b.size {
+	if size > 0 && size <= int(b.size) {
 		b.burstSize = size
 	}
+}
+
+// HasData returns true if there's data available after pos
+func (b *Buffer) HasData(pos int64) bool {
+	return b.writePos.Load() > pos
+}
+
+// Available returns bytes available to read from pos
+func (b *Buffer) Available(pos int64) int64 {
+	writePos := b.writePos.Load()
+	if pos >= writePos {
+		return 0
+	}
+	return writePos - pos
 }

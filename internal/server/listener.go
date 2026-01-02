@@ -1,5 +1,5 @@
 // Package server handles HTTP server and listener connections
-// Ultra-low-latency implementation with robust MP3 frame alignment
+// Robust, high-performance streaming with automatic recovery
 package server
 
 import (
@@ -19,172 +19,33 @@ import (
 // Version of GoCast server
 var Version = "dev"
 
-// Streaming constants optimized for low latency and smooth playback
+// Streaming constants
 const (
-	// Chunk size for reading from buffer - balance between efficiency and latency
-	chunkSize = 8192 // 8KB chunks - ~200ms at 320kbps
+	// Read chunk size - balance between efficiency and latency
+	// 4KB = ~100ms at 320kbps, good for smooth streaming
+	streamChunkSize = 4096
 
-	// Initial burst to prime player buffer - must contain complete MP3 frames
-	initialBurstSize = 16384 // 16KB ensures smooth start (~400ms at 320kbps)
+	// Poll interval when waiting for data
+	dataPollInterval = 5 * time.Millisecond
 
-	// Poll interval when no data available - tight loop for responsiveness
-	pollInterval = 2 * time.Millisecond
+	// How long to wait for source reconnection (between songs)
+	sourceReconnectWait = 15 * time.Second
 
-	// ICY metadata interval (bytes between metadata blocks)
-	icyMetadataInterval = 16000
+	// ICY metadata interval
+	icyMetaInterval = 16000
 
-	// MP3 frame sizes at 320kbps: ~1044 bytes at 44.1kHz, ~960 bytes at 48kHz
-	maxMP3FrameSize = 1152 // Maximum possible MP3 frame size
+	// Client timeout for inactive connections
+	defaultClientTimeout = 60 * time.Second
 )
 
-// MP3FrameScanner handles finding and aligning to MP3 frame boundaries
-type MP3FrameScanner struct {
-	synced    bool
-	remainder []byte // Partial frame data waiting for more
-}
-
-// FindFrameStart finds the first valid MP3 frame sync in data
-// Returns offset to frame start, or -1 if not found
-func (s *MP3FrameScanner) FindFrameStart(data []byte) int {
-	if len(data) < 4 {
-		return -1
-	}
-
-	for i := 0; i < len(data)-3; i++ {
-		if isValidMP3FrameHeader(data[i:]) {
-			return i
-		}
-	}
-	return -1
-}
-
-// isValidMP3FrameHeader checks if bytes form a valid MP3 frame header
-func isValidMP3FrameHeader(data []byte) bool {
-	if len(data) < 4 {
-		return false
-	}
-
-	// First byte must be 0xFF (frame sync)
-	if data[0] != 0xFF {
-		return false
-	}
-
-	b1 := data[1]
-	// Second byte: top 3 bits must be set (0xE0), but not 0xFF
-	if b1 == 0xFF || (b1&0xE0) != 0xE0 {
-		return false
-	}
-
-	// Extract header fields
-	version := (b1 >> 3) & 0x03 // MPEG version
-	layer := (b1 >> 1) & 0x03   // Layer
-	// protection := b1 & 0x01     // CRC protection (not needed for validation)
-
-	// Version 01 is reserved
-	if version == 0x01 {
-		return false
-	}
-
-	// Layer 00 is reserved
-	if layer == 0x00 {
-		return false
-	}
-
-	b2 := data[2]
-	bitrate := (b2 >> 4) & 0x0F    // Bitrate index
-	sampleRate := (b2 >> 2) & 0x03 // Sample rate index
-
-	// Bitrate 1111 is invalid
-	if bitrate == 0x0F {
-		return false
-	}
-
-	// Bitrate 0000 is "free" format - technically valid but rare
-	// We'll accept it
-
-	// Sample rate 11 is reserved
-	if sampleRate == 0x03 {
-		return false
-	}
-
-	// Valid MP3 frame header!
-	return true
-}
-
-// getMP3FrameSize calculates the frame size from header bytes
-func getMP3FrameSize(data []byte) int {
-	if len(data) < 4 || !isValidMP3FrameHeader(data) {
-		return 0
-	}
-
-	b1 := data[1]
-	version := (b1 >> 3) & 0x03
-	layer := (b1 >> 1) & 0x03
-
-	b2 := data[2]
-	bitrateIdx := (b2 >> 4) & 0x0F
-	sampleRateIdx := (b2 >> 2) & 0x03
-	padding := (b2 >> 1) & 0x01
-
-	// Bitrate table for MPEG1 Layer 3 (most common)
-	bitratesV1L3 := []int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}
-	// Bitrate table for MPEG2/2.5 Layer 3
-	bitratesV2L3 := []int{0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0}
-
-	// Sample rate tables
-	sampleRatesV1 := []int{44100, 48000, 32000, 0}
-	sampleRatesV2 := []int{22050, 24000, 16000, 0}
-	sampleRatesV25 := []int{11025, 12000, 8000, 0}
-
-	var bitrate, sampleRate, samplesPerFrame int
-
-	switch version {
-	case 0x03: // MPEG1
-		if layer == 0x01 { // Layer 3
-			bitrate = bitratesV1L3[bitrateIdx] * 1000
-			samplesPerFrame = 1152
-		} else {
-			return 0 // Unsupported layer
-		}
-		sampleRate = sampleRatesV1[sampleRateIdx]
-	case 0x02: // MPEG2
-		if layer == 0x01 { // Layer 3
-			bitrate = bitratesV2L3[bitrateIdx] * 1000
-			samplesPerFrame = 576
-		} else {
-			return 0
-		}
-		sampleRate = sampleRatesV2[sampleRateIdx]
-	case 0x00: // MPEG2.5
-		if layer == 0x01 {
-			bitrate = bitratesV2L3[bitrateIdx] * 1000
-			samplesPerFrame = 576
-		} else {
-			return 0
-		}
-		sampleRate = sampleRatesV25[sampleRateIdx]
-	default:
-		return 0
-	}
-
-	if bitrate == 0 || sampleRate == 0 {
-		return 0
-	}
-
-	// Frame size formula: (samples_per_frame / 8 * bitrate) / sample_rate + padding
-	frameSize := (samplesPerFrame * bitrate / 8) / sampleRate
-	if padding == 1 {
-		frameSize++
-	}
-
-	return frameSize
-}
-
-// ListenerHandler handles listener connections
+// ListenerHandler handles listener HTTP requests
 type ListenerHandler struct {
 	mountManager *stream.MountManager
 	config       *config.Config
 	logger       *log.Logger
+
+	// Buffer pool to reduce allocations
+	bufPool sync.Pool
 }
 
 // NewListenerHandler creates a new listener handler
@@ -196,18 +57,23 @@ func NewListenerHandler(mm *stream.MountManager, cfg *config.Config, logger *log
 		mountManager: mm,
 		config:       cfg,
 		logger:       logger,
+		bufPool: sync.Pool{
+			New: func() interface{} {
+				buf := make([]byte, streamChunkSize)
+				return &buf
+			},
+		},
 	}
 }
 
-// ServeHTTP handles listener requests
+// ServeHTTP handles listener GET requests
 func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mountPath := r.URL.Path
 	if mountPath == "" {
 		mountPath = "/"
 	}
 
-	h.logger.Printf("DEBUG: Listener connecting: %s from %s (method: %s, user-agent: %s)",
-		mountPath, getClientIP(r), r.Method, r.UserAgent())
+	clientIP := getClientIP(r)
 
 	// Get mount
 	mount := h.mountManager.GetMount(mountPath)
@@ -216,13 +82,7 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if source is active
-	if !mount.IsActive() {
-		http.Error(w, "Stream offline", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Check listener limit
+	// Check if we can add listener
 	if !mount.CanAddListener() {
 		http.Error(w, "Listener limit reached", http.StatusServiceUnavailable)
 		return
@@ -235,18 +95,18 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create listener
-	listener := stream.NewListener(getClientIP(r), r.UserAgent())
+	listener := stream.NewListener(clientIP, r.UserAgent())
 	mount.AddListener(listener)
 	defer mount.RemoveListener(listener)
 
-	// Check for ICY metadata support
+	// Check for ICY metadata request
 	metadataInterval := 0
 	if r.Header.Get("Icy-MetaData") == "1" {
-		metadataInterval = icyMetadataInterval
+		metadataInterval = icyMetaInterval
 	}
 
 	// Set response headers
-	h.setResponseHeaders(w, mount, metadataInterval)
+	h.setHeaders(w, mount, metadataInterval)
 
 	// Get flusher for streaming
 	flusher, hasFlusher := w.(http.Flusher)
@@ -254,21 +114,21 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Stream with frame-aligned data
-	h.streamWithFrameAlignment(w, flusher, hasFlusher, listener, mount, metadataInterval)
+	// Stream audio to client
+	h.streamToClient(w, flusher, hasFlusher, listener, mount, metadataInterval)
 }
 
-// setResponseHeaders sets HTTP response headers for streaming
-func (h *ListenerHandler) setResponseHeaders(w http.ResponseWriter, mount *stream.Mount, metadataInterval int) {
+// setHeaders sets HTTP response headers for streaming
+func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount, metaInterval int) {
 	meta := mount.GetMetadata()
 
-	// Essential streaming headers
 	w.Header().Set("Content-Type", meta.ContentType)
 	w.Header().Set("Connection", "close")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Server", "GoCast/"+Version)
 
-	// ICY headers for compatibility
+	// ICY headers
 	if meta.Name != "" {
 		w.Header().Set("icy-name", meta.Name)
 	}
@@ -279,134 +139,161 @@ func (h *ListenerHandler) setResponseHeaders(w http.ResponseWriter, mount *strea
 		w.Header().Set("icy-br", strconv.Itoa(meta.Bitrate))
 	}
 	w.Header().Set("icy-pub", "1")
-	if metadataInterval > 0 {
-		w.Header().Set("icy-metaint", strconv.Itoa(metadataInterval))
+	if metaInterval > 0 {
+		w.Header().Set("icy-metaint", strconv.Itoa(metaInterval))
 	}
 
-	// Server identification
-	w.Header().Set("Server", "GoCast/"+Version)
-
-	// CORS for web players
+	// CORS
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Origin, Accept, X-Requested-With, Content-Type, Icy-MetaData")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 
-	// Send headers immediately
 	w.WriteHeader(http.StatusOK)
 }
 
-// streamWithFrameAlignment streams audio data with MP3 frame alignment
-func (h *ListenerHandler) streamWithFrameAlignment(w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metadataInterval int) {
+// streamToClient streams audio data to client with robust error handling
+func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metaInterval int) {
 	buffer := mount.Buffer()
 	if buffer == nil {
 		return
 	}
 
-	// Get current write position - this is where live data is being written
-	writePos := buffer.WritePos()
+	// Wait for source if not active (allows connecting before source starts)
+	if !mount.IsActive() {
+		waitStart := time.Now()
+		for !mount.IsActive() {
+			if time.Since(waitStart) > sourceReconnectWait {
+				return // No source after waiting
+			}
+			select {
+			case <-listener.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+				// Keep waiting
+			}
+		}
+	}
 
-	// Start reading from live position (no burst, just catch up to live edge)
-	// This avoids the complexity of frame alignment on old data
-	readPos := writePos
+	// Get buffer from pool
+	bufPtr := h.bufPool.Get().(*[]byte)
+	readBuf := *bufPtr
+	defer h.bufPool.Put(bufPtr)
 
-	// For the first chunk, we need to find an MP3 frame boundary
-	needsFrameSync := true
+	// Start at live position
+	readPos := buffer.WritePos()
+
+	// Frame sync state - find MP3 frame on first read
+	needsSync := true
 
 	// Metadata state
 	var metaByteCount int
-	var lastMetadata string
-
-	// Notification channel for new data
-	notifyChan := buffer.NotifyChan()
+	var lastMeta string
 
 	// Timeout handling
 	timeout := h.config.Limits.ClientTimeout
 	if timeout == 0 {
-		timeout = 60 * time.Second
+		timeout = defaultClientTimeout
 	}
 	lastActivity := time.Now()
 
-	// Pre-allocate buffer for metadata operations
-	metaBuf := make([]byte, chunkSize)
+	// Source disconnect handling
+	var sourceDisconnectTime time.Time
+	sourceWasActive := true // We know it's active now
 
-	// MP3 frame scanner for initial sync
-	scanner := &MP3FrameScanner{}
-
-	// Main streaming loop - optimized for throughput
+	// Main streaming loop
 	for {
-		// Non-blocking check for disconnect
+		// Check client disconnect
 		select {
 		case <-listener.Done():
 			return
 		default:
 		}
 
-		// Check mount still active
-		if !mount.IsActive() {
-			return
-		}
+		// Check source status with reconnection support
+		sourceActive := mount.IsActive()
 
-		// Read all available data up to chunk size
-		data, newPos := buffer.ReadFrom(readPos, chunkSize)
-
-		if len(data) == 0 {
-			// Check timeout before waiting
-			if time.Since(lastActivity) > timeout {
-				return
+		if !sourceActive {
+			if sourceWasActive {
+				// Source just disconnected, start waiting
+				sourceDisconnectTime = time.Now()
+				sourceWasActive = false
 			}
 
-			// Wait for new data - use select with short timeout
+			// Check if we've waited too long
+			if time.Since(sourceDisconnectTime) > sourceReconnectWait {
+				return // Give up, source not coming back
+			}
+
+			// Wait a bit for reconnection
 			select {
 			case <-listener.Done():
 				return
-			case <-notifyChan:
-				// New data signaled, immediately try to read
-			case <-time.After(pollInterval):
-				// Poll timeout, check again
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
+		} else {
+			if !sourceWasActive {
+				// Source just reconnected - reset to live position
+				readPos = buffer.WritePos()
+				needsSync = true // Need to find MP3 frame again
+			}
+			sourceWasActive = true
+		}
+
+		// Check client timeout
+		if time.Since(lastActivity) > timeout {
+			return
+		}
+
+		// Try to read data
+		n, newPos := buffer.ReadFromInto(readPos, readBuf)
+
+		if n == 0 {
+			// No data available, wait efficiently
+			if buffer.WaitForData(readPos, dataPollInterval) {
+				continue
 			}
 			continue
 		}
 
-		// Update read position BEFORE writing (prevents re-reading same data)
+		data := readBuf[:n]
 		readPos = newPos
 		lastActivity = time.Now()
 
-		// On first chunk, find MP3 frame boundary to avoid initial noise
-		if needsFrameSync && len(data) >= 4 {
-			frameStart := scanner.FindFrameStart(data)
-			if frameStart > 0 && frameStart < len(data)-4 {
-				// Skip bytes before first valid frame
-				data = data[frameStart:]
+		// Find MP3 frame sync on first chunk
+		if needsSync && n >= 4 {
+			syncOffset := findMP3Sync(data)
+			if syncOffset > 0 && syncOffset < n-4 {
+				data = data[syncOffset:]
 			}
-			needsFrameSync = false // Only do this once
+			needsSync = false
 		}
 
-		// Skip if we have no data after frame sync
 		if len(data) == 0 {
 			continue
 		}
 
-		// Write data to client
+		// Write to client
 		var err error
-		if metadataInterval > 0 {
-			err = h.writeWithMetadata(w, data, mount, &metaByteCount, &lastMetadata, metadataInterval, metaBuf)
+		if metaInterval > 0 {
+			err = writeDataWithMeta(w, data, mount, &metaByteCount, &lastMeta, metaInterval)
 		} else {
 			_, err = w.Write(data)
 		}
 
 		if err != nil {
-			return
+			return // Client disconnected
 		}
 
 		listener.BytesSent += int64(len(data))
 		listener.LastActive = lastActivity
 
-		// Flush after each write for low latency
+		// Flush for low latency
 		if hasFlusher {
 			flusher.Flush()
 		}
 
-		// Check listener duration limit (less frequently)
+		// Check duration limit
 		if mount.Config.MaxListenerDuration > 0 {
 			if time.Since(listener.ConnectedAt) > mount.Config.MaxListenerDuration {
 				return
@@ -415,26 +302,65 @@ func (h *ListenerHandler) streamWithFrameAlignment(w http.ResponseWriter, flushe
 	}
 }
 
-// writeWithMetadata writes data with ICY metadata interleaved
-func (h *ListenerHandler) writeWithMetadata(w io.Writer, data []byte, mount *stream.Mount, byteCount *int, lastMeta *string, interval int, buf []byte) error {
+// findMP3Sync finds the first valid MP3 frame sync in data
+// Returns offset to frame start, or 0 if not found
+func findMP3Sync(data []byte) int {
+	if len(data) < 4 {
+		return 0
+	}
+
+	for i := 0; i < len(data)-3; i++ {
+		if data[i] != 0xFF {
+			continue
+		}
+
+		b1 := data[i+1]
+
+		// Check frame sync: 0xFF followed by 0xE0-0xFE
+		if b1 == 0xFF || (b1&0xE0) != 0xE0 {
+			continue
+		}
+
+		// Validate MPEG version and layer
+		version := (b1 >> 3) & 0x03
+		layer := (b1 >> 1) & 0x03
+		if version == 0x01 || layer == 0x00 {
+			continue // Reserved values
+		}
+
+		// Validate bitrate and sample rate
+		b2 := data[i+2]
+		bitrate := (b2 >> 4) & 0x0F
+		sampleRate := (b2 >> 2) & 0x03
+		if bitrate == 0x0F || sampleRate == 0x03 {
+			continue // Invalid values
+		}
+
+		return i // Valid frame found
+	}
+
+	return 0
+}
+
+// writeDataWithMeta writes data with ICY metadata interleaved
+func writeDataWithMeta(w io.Writer, data []byte, mount *stream.Mount, byteCount *int, lastMeta *string, interval int) error {
 	remaining := data
+
 	for len(remaining) > 0 {
-		// Bytes until next metadata block
 		bytesUntilMeta := interval - *byteCount
 
 		if bytesUntilMeta <= 0 {
-			// Time to send metadata
+			// Send metadata block
 			meta := mount.GetMetadata()
-			currentMeta := formatStreamTitle(meta.Title, meta.Artist)
+			title := formatTitle(meta.Title, meta.Artist)
 
-			// Only send if changed
-			if currentMeta != *lastMeta {
-				if err := writeMetadataBlock(w, currentMeta); err != nil {
+			if title != *lastMeta {
+				if err := sendMetaBlock(w, title); err != nil {
 					return err
 				}
-				*lastMeta = currentMeta
+				*lastMeta = title
 			} else {
-				// Send empty metadata block
+				// Empty metadata block
 				if _, err := w.Write([]byte{0}); err != nil {
 					return err
 				}
@@ -443,7 +369,7 @@ func (h *ListenerHandler) writeWithMetadata(w io.Writer, data []byte, mount *str
 			bytesUntilMeta = interval
 		}
 
-		// Write audio data up to next metadata point
+		// Write audio data
 		toWrite := len(remaining)
 		if toWrite > bytesUntilMeta {
 			toWrite = bytesUntilMeta
@@ -456,60 +382,56 @@ func (h *ListenerHandler) writeWithMetadata(w io.Writer, data []byte, mount *str
 		*byteCount += n
 		remaining = remaining[toWrite:]
 	}
+
 	return nil
 }
 
-// formatStreamTitle formats metadata for ICY protocol
-func formatStreamTitle(title, artist string) string {
+// formatTitle formats metadata for streaming
+func formatTitle(title, artist string) string {
 	if artist != "" && title != "" {
-		return fmt.Sprintf("%s - %s", artist, title)
+		return artist + " - " + title
 	}
 	if title != "" {
 		return title
 	}
-	if artist != "" {
-		return artist
-	}
-	return ""
+	return artist
 }
 
-// writeMetadataBlock writes an ICY metadata block
-func writeMetadataBlock(w io.Writer, title string) error {
+// sendMetaBlock sends an ICY metadata block
+func sendMetaBlock(w io.Writer, title string) error {
 	if title == "" {
 		_, err := w.Write([]byte{0})
 		return err
 	}
 
 	// Format: StreamTitle='...';
-	metaStr := fmt.Sprintf("StreamTitle='%s';", escapeMetadata(title))
+	meta := fmt.Sprintf("StreamTitle='%s';", escapeMeta(title))
 
-	// Pad to 16-byte boundary
-	metaLen := len(metaStr)
-	blocks := (metaLen + 15) / 16
+	// Calculate block count (16-byte blocks)
+	blocks := (len(meta) + 15) / 16
 	if blocks > 255 {
 		blocks = 255
-		metaStr = metaStr[:255*16]
+		meta = meta[:255*16]
 	}
 
-	paddedLen := blocks * 16
-	metaBytes := make([]byte, 1+paddedLen)
-	metaBytes[0] = byte(blocks)
-	copy(metaBytes[1:], metaStr)
-	// Remaining bytes are already zero (padding)
+	// Pad to block boundary
+	padded := make([]byte, 1+blocks*16)
+	padded[0] = byte(blocks)
+	copy(padded[1:], meta)
 
-	_, err := w.Write(metaBytes)
+	_, err := w.Write(padded)
 	return err
 }
 
-// escapeMetadata escapes special characters in metadata
-func escapeMetadata(s string) string {
+// escapeMeta escapes metadata characters
+func escapeMeta(s string) string {
 	s = strings.ReplaceAll(s, "'", "'")
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.ReplaceAll(s, "\r", "")
 	return s
 }
 
-// checkIPAllowed verifies client IP against mount restrictions
+// checkIPAllowed checks IP restrictions
 func (h *ListenerHandler) checkIPAllowed(r *http.Request, mount *stream.Mount) bool {
 	if len(mount.Config.AllowedIPs) == 0 {
 		return true
@@ -524,12 +446,11 @@ func (h *ListenerHandler) checkIPAllowed(r *http.Request, mount *stream.Mount) b
 	return false
 }
 
-// matchIP checks if client IP matches allowed pattern
+// matchIP matches IP against pattern
 func matchIP(clientIP, pattern string) bool {
 	if pattern == "*" {
 		return true
 	}
-	// Simple prefix match for CIDR-like patterns
 	if strings.HasSuffix(pattern, ".*") {
 		prefix := strings.TrimSuffix(pattern, "*")
 		return strings.HasPrefix(clientIP, prefix)
@@ -539,16 +460,13 @@ func matchIP(clientIP, pattern string) bool {
 
 // getClientIP extracts client IP from request
 func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For first (for reverse proxies)
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
 		return strings.TrimSpace(parts[0])
 	}
-	// Check X-Real-IP
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
 		return strings.TrimSpace(xri)
 	}
-	// Fall back to RemoteAddr
 	host := r.RemoteAddr
 	if idx := strings.LastIndex(host, ":"); idx != -1 {
 		host = host[:idx]
@@ -573,7 +491,7 @@ type StatusHandler struct {
 	config       *config.Config
 }
 
-// NewStatusHandler creates a status handler
+// NewStatusHandler creates a new status handler
 func NewStatusHandler(mm *stream.MountManager, cfg *config.Config) *StatusHandler {
 	return &StatusHandler{mountManager: mm, config: cfg}
 }
@@ -592,6 +510,7 @@ func (h *StatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	mounts := h.mountManager.ListMounts()
 	var sb strings.Builder
@@ -686,20 +605,4 @@ func escapeJSON(s string) string {
 	s = strings.ReplaceAll(s, "\"", "\\\"")
 	s = strings.ReplaceAll(s, "\n", "\\n")
 	return s
-}
-
-// ========== Connection Pool for efficiency ==========
-
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, chunkSize)
-	},
-}
-
-func getBuffer() []byte {
-	return bufferPool.Get().([]byte)
-}
-
-func putBuffer(buf []byte) {
-	bufferPool.Put(buf)
 }
