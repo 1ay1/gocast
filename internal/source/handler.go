@@ -82,13 +82,35 @@ func (h *Handler) HandleSource(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Printf("Source connected: %s from %s", mountPath, clientIP)
 
-	// Send success response for PUT requests
-	if r.Method == http.MethodPut {
-		w.WriteHeader(http.StatusOK)
+	// For PUT requests, we need to hijack the connection to send an immediate
+	// response and then continue reading the stream data. This is required
+	// because Icecast clients (like ffmpeg) expect an immediate 200 OK before
+	// they start sending audio data.
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		h.logger.Printf("Hijacking not supported for %s", mountPath)
+		mount.StopSource()
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
 	}
 
-	// Handle the stream
-	h.streamSource(r, mount, mountPath)
+	conn, bufrw, err := hijacker.Hijack()
+	if err != nil {
+		h.logger.Printf("Failed to hijack connection for %s: %v", mountPath, err)
+		mount.StopSource()
+		http.Error(w, "Streaming error", http.StatusInternalServerError)
+		return
+	}
+	defer conn.Close()
+
+	// Send HTTP 200 OK response immediately - this is what Icecast does
+	// and what clients expect before they start streaming
+	bufrw.WriteString("HTTP/1.0 200 OK\r\n")
+	bufrw.WriteString("\r\n")
+	bufrw.Flush()
+
+	// Now stream from the connection - the client will send audio data
+	h.streamFromReader(bufrw.Reader, mount, mountPath)
 
 	// Cleanup
 	mount.StopSource()
