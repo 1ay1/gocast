@@ -1,327 +1,274 @@
-# GoCast 🎵
+<div align="center">
 
-A modern, drop-in replacement for Icecast written in Go. GoCast provides a high-performance audio streaming server with full compatibility with existing Icecast source clients and listeners.
+```
+   ██████╗  ██████╗  ██████╗ █████╗ ███████╗████████╗
+  ██╔════╝ ██╔═══██╗██╔════╝██╔══██╗██╔════╝╚══██╔══╝
+  ██║  ███╗██║   ██║██║     ███████║███████╗   ██║
+  ██║   ██║██║   ██║██║     ██╔══██║╚════██║   ██║
+  ╚██████╔╝╚██████╔╝╚██████╗██║  ██║███████║   ██║
+   ╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝   ╚═╝
+```
 
-## Features
+# 🎵 GoCast
 
-- **Full Icecast Compatibility** - Works with existing source clients (Liquidsoap, BUTT, Mixxx, etc.) and all audio players
-- **Multiple Format Support** - MP3, Ogg Vorbis, Opus, AAC, FLAC, and more
-- **ICY Metadata** - Full support for in-stream metadata (now playing info)
-- **Multiple Mount Points** - Host multiple streams on a single server
-- **Admin Interface** - Web-based administration panel
-- **Statistics API** - JSON/XML compatible with Icecast stats format
-- **SSL/TLS Support** - Secure streaming with HTTPS
-- **CORS Support** - Built-in support for web-based players
-- **Low Resource Usage** - Efficient Go implementation
-- **Modern Configuration** - Uses the human-friendly VIBE config format
+### A Modern, Drop-in Replacement for Icecast
 
-## Quick Start
+[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go)](https://go.dev)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+[![Icecast Compatible](https://img.shields.io/badge/Icecast-Compatible-blue?style=for-the-badge)](https://icecast.org)
 
-### Installation
+**Stream audio to thousands of listeners with a single binary. No dependencies. No complexity.**
+
+[Getting Started](#-quick-start) •
+[Documentation](docs/) •
+[Configuration](#-configuration) •
+[API Reference](docs/admin-api.md)
+
+</div>
+
+---
+
+## ⚡ Why GoCast?
+
+| Feature | Icecast | GoCast |
+|---------|---------|--------|
+| Language | C | **Go** |
+| Config Format | XML 😱 | **[VIBE](https://github.com/1ay1/vibe)** 🌊 |
+| Memory Safety | Manual | **Automatic** |
+| Single Binary | ❌ | **✅** |
+| Docker Ready | Requires setup | **Native** |
+| CORS Support | Manual | **Built-in** |
+| Modern Codebase | 20+ years old | **Fresh & Clean** |
+
+## ✨ Features
+
+- 🔌 **100% Icecast Compatible** - Works with FFmpeg, BUTT, Liquidsoap, Mixxx, and all Icecast clients
+- 🎧 **Multi-Format Support** - MP3, Ogg Vorbis, Opus, AAC, FLAC, and more
+- 📊 **ICY Metadata** - Real-time "Now Playing" updates to all listeners
+- 🔀 **Multiple Mounts** - Host unlimited streams on a single server
+- 🛡️ **Built-in Security** - Authentication, IP filtering, SSL/TLS
+- 📈 **Live Statistics** - JSON/XML API compatible with existing tools
+- 🎛️ **Web Admin Panel** - Manage everything from your browser
+- 🐳 **Docker Ready** - Deploy anywhere in seconds
+
+## 🚀 Quick Start
+
+### One-liner Install
 
 ```bash
-# Clone the repository
-git clone https://github.com/gocast/gocast.git
+git clone https://github.com/1ay1/gocast.git && cd gocast && go build -o gocast ./cmd/gocast && ./gocast
+```
+
+### What You'll See
+
+```
+   ██████╗  ██████╗  ██████╗ █████╗ ███████╗████████╗
+  ██╔════╝ ██╔═══██╗██╔════╝██╔══██╗██╔════╝╚══██╔══╝
+  ██║  ███╗██║   ██║██║     ███████║███████╗   ██║
+  ██║   ██║██║   ██║██║     ██╔══██║╚════██║   ██║
+  ╚██████╔╝╚██████╔╝╚██████╗██║  ██║███████║   ██║
+   ╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝   ╚═╝
+
+  Modern Icecast Replacement - v1.0.0
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[GoCast] Loading configuration from gocast.vibe
+[GoCast] GoCast is running on http://localhost:8000
+[GoCast] Admin interface: http://localhost:8000/admin/
+[GoCast] Starting GoCast HTTP server on 0.0.0.0:8000
+```
+
+### Start Streaming
+
+```bash
+# Stream with FFmpeg
+ffmpeg -re -i music.mp3 -c:a libmp3lame -b:a 320k -f mp3 \
+  icecast://source:hackme@localhost:8000/live
+
+# Listen
+mpv http://localhost:8000/live
+```
+
+**That's it!** 🎉
+
+## 📦 Installation
+
+### From Source
+
+```bash
+git clone https://github.com/1ay1/gocast.git
 cd gocast
-
-# Build
 go build -o gocast ./cmd/gocast
-
-# Run with default configuration
-./gocast
 ```
 
 ### Docker
 
 ```bash
-docker run -p 8000:8000 gocast/gocast
+docker build -t gocast .
+docker run -p 8000:8000 gocast
 ```
 
-### Configuration
+### Docker Compose
 
-GoCast uses the [VIBE](https://github.com/1ay1/vibe) configuration format. Create a `gocast.vibe` file:
+```bash
+docker-compose up -d
+```
+
+## 🔧 Configuration
+
+GoCast uses [VIBE](https://github.com/1ay1/vibe) - a human-friendly config format. No more XML nightmares!
 
 ```vibe
-# GoCast Configuration
+# gocast.vibe - Simple and clean!
 
 server {
-    hostname localhost
+    hostname myradio.example.com
     port 8000
-    location "My Radio Station"
 }
 
 auth {
-    source_password your_source_password
+    source_password super_secret_password
     admin_user admin
-    admin_password your_admin_password
-}
-
-limits {
-    max_clients 100
-    max_sources 10
+    admin_password admin_password
 }
 
 mounts {
     live {
-        stream_name "Live Stream"
-        genre "Music"
-        description "24/7 Live Radio"
-        type audio/mpeg
-        public true
+        stream_name "My Awesome Radio"
+        genre "Electronic"
+        description "24/7 Best Beats"
+        max_listeners 1000
+        bitrate 320
     }
 }
 ```
 
-Run GoCast with your configuration:
+📖 [Full Configuration Reference →](docs/configuration.md)
+
+## 🎙️ Connect Your Source
+
+### FFmpeg
 
 ```bash
-./gocast -config gocast.vibe
+ffmpeg -re -i playlist.m3u -c:a libmp3lame -b:a 320k -f mp3 \
+  icecast://source:password@localhost:8000/live
 ```
 
-## Streaming to GoCast
+### BUTT (Broadcast Using This Tool)
 
-### Using BUTT (Broadcast Using This Tool)
+1. Server Type: **Icecast**
+2. Address: `localhost`
+3. Port: `8000`
+4. Password: `hackme`
+5. Mount: `/live`
 
-1. Open BUTT settings
-2. Set Server Type to "Icecast"
-3. Address: `localhost`
-4. Port: `8000`
-5. Password: Your source password
-6. Mount: `/live`
-
-### Using Liquidsoap
+### Liquidsoap
 
 ```liquidsoap
-output.icecast(
-  %mp3(bitrate=128),
-  host="localhost",
-  port=8000,
-  password="your_source_password",
-  mount="/live",
-  source
-)
+output.icecast(%mp3(bitrate=320),
+  host="localhost", port=8000,
+  password="hackme", mount="/live",
+  source)
 ```
 
-### Using FFmpeg
+📖 [All Source Clients →](docs/sources.md)
+
+## 👂 Listen
+
+| Player | Command |
+|--------|---------|
+| **Browser** | `http://localhost:8000/live` |
+| **VLC** | `vlc http://localhost:8000/live` |
+| **mpv** | `mpv http://localhost:8000/live` |
+| **curl** | `curl http://localhost:8000/live -o recording.mp3` |
+
+## 📊 API & Monitoring
+
+### Status Page
+```
+http://localhost:8000/          → HTML status page
+http://localhost:8000/status?format=json  → JSON API
+http://localhost:8000/status?format=xml   → XML (Icecast compatible)
+```
+
+### Admin Panel
+```
+http://localhost:8000/admin/    → Web interface
+```
+
+### Admin API
 
 ```bash
-ffmpeg -re -i input.mp3 -c:a libmp3lame -b:a 128k \
-  -f mp3 icecast://source:your_source_password@localhost:8000/live
+# Update now playing
+curl -u admin:hackme "http://localhost:8000/admin/metadata?mount=/live&mode=updinfo&song=Artist%20-%20Song"
+
+# List listeners
+curl -u admin:hackme "http://localhost:8000/admin/listclients?mount=/live"
+
+# Kick a listener
+curl -u admin:hackme "http://localhost:8000/admin/killclient?mount=/live&id=UUID"
 ```
 
-### Using cURL (HTTP PUT)
+📖 [Full API Reference →](docs/admin-api.md)
 
-```bash
-cat audio.mp3 | curl -X PUT -H "Authorization: Basic $(echo -n source:password | base64)" \
-  -H "Content-Type: audio/mpeg" \
-  --data-binary @- http://localhost:8000/live
-```
+## 📚 Documentation
 
-## Listening
-
-### Direct URL
-
-```
-http://localhost:8000/live
-```
-
-### With Metadata Support
-
-Add the `Icy-MetaData: 1` header to receive inline metadata:
-
-```bash
-curl -H "Icy-MetaData: 1" http://localhost:8000/live
-```
-
-### Web Players
-
-GoCast includes CORS headers for web-based players:
-
-```html
-<audio src="http://localhost:8000/live" controls></audio>
-```
-
-## API Endpoints
-
-### Status
-
-| Endpoint | Description |
+| Document | Description |
 |----------|-------------|
-| `GET /` | HTML status page |
-| `GET /status` | HTML status page |
-| `GET /status?format=json` | JSON status |
-| `GET /status?format=xml` | XML status (Icecast compatible) |
+| [Getting Started](docs/getting-started.md) | Installation and first steps |
+| [Configuration](docs/configuration.md) | Complete config reference |
+| [Streaming Sources](docs/sources.md) | FFmpeg, BUTT, Liquidsoap, etc. |
+| [Listeners](docs/listeners.md) | Client compatibility and features |
+| [Admin API](docs/admin-api.md) | REST API documentation |
+| [Architecture](docs/architecture.md) | Internal design and data flow |
+| [VIBE Format](docs/vibe.md) | Configuration format guide |
 
-### Admin (requires authentication)
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /admin/` | Admin dashboard |
-| `GET /admin/stats` | Server statistics (XML) |
-| `GET /admin/listmounts` | List all mounts |
-| `GET /admin/listclients?mount=/live` | List listeners |
-| `GET /admin/metadata?mount=/live&mode=updinfo&song=Title` | Update metadata |
-| `GET /admin/killclient?mount=/live&id=xxx` | Disconnect listener |
-| `GET /admin/killsource?mount=/live` | Disconnect source |
-
-## Configuration Reference
-
-### Server Section
-
-```vibe
-server {
-    hostname localhost        # Server hostname
-    listen 0.0.0.0           # Listen address
-    port 8000                # HTTP port
-    ssl_port 8443            # HTTPS port
-    location "Earth"         # Server location
-    server_id GoCast         # Server identifier
-    admin_root /admin        # Admin URL path
-
-    ssl {
-        enabled false
-        cert /path/to/cert.crt
-        key /path/to/key.key
-    }
-}
-```
-
-### Authentication Section
-
-```vibe
-auth {
-    source_password hackme    # Default source password
-    relay_password ""         # Relay connection password
-    admin_user admin          # Admin username
-    admin_password hackme     # Admin password
-}
-```
-
-### Limits Section
-
-```vibe
-limits {
-    max_clients 100              # Max total connections
-    max_sources 10               # Max source connections
-    max_listeners_per_mount 100  # Max listeners per mount
-    queue_size 524288            # Buffer size (bytes)
-    burst_size 65535             # Initial burst (bytes)
-    client_timeout 30            # Listener timeout (seconds)
-    header_timeout 15            # Header read timeout
-    source_timeout 10            # Source timeout
-}
-```
-
-### Mount Section
-
-```vibe
-mounts {
-    live {
-        password secret           # Mount-specific password
-        max_listeners 100
-        fallback /fallback        # Fallback mount
-        stream_name "My Stream"
-        genre "Various"
-        description "Description"
-        url "http://example.com"
-        bitrate 128
-        type audio/mpeg
-        public true
-        hidden false
-        burst_size 65535
-        max_listener_duration 0   # 0 = unlimited
-        allowed_ips [192.168.1.*]
-        denied_ips [10.0.0.1]
-        dump_file /path/to/dump.mp3
-    }
-}
-```
-
-## Signals
-
-| Signal | Action |
-|--------|--------|
-| `SIGINT` / `SIGTERM` | Graceful shutdown |
-| `SIGHUP` | Reload configuration |
-
-## Comparison with Icecast
-
-| Feature | GoCast | Icecast |
-|---------|--------|---------|
-| Language | Go | C |
-| Config Format | VIBE | XML |
-| Memory Safety | Yes | Manual |
-| Concurrency | Goroutines | Threads |
-| Hot Reload | Partial | No |
-| CORS | Built-in | Manual |
-| Docker | Native | Requires setup |
-| WebSocket | Planned | No |
-
-## Building from Source
-
-### Requirements
-
-- Go 1.22 or later
-
-### Build
-
-```bash
-# Standard build
-go build -o gocast ./cmd/gocast
-
-# With optimizations
-go build -ldflags="-s -w" -o gocast ./cmd/gocast
-
-# Cross-compile for Linux
-GOOS=linux GOARCH=amd64 go build -o gocast-linux ./cmd/gocast
-```
-
-### Testing
-
-```bash
-go test ./...
-```
-
-## Project Structure
+## 🏗️ Project Structure
 
 ```
 gocast/
-├── cmd/gocast/           # Main application
+├── cmd/gocast/          # Application entry point
 ├── internal/
-│   ├── config/          # Configuration handling
-│   ├── server/          # HTTP server & listeners
-│   ├── source/          # Source client handling
-│   ├── stream/          # Stream buffer & mounts
-│   ├── stats/           # Statistics collection
-│   └── auth/            # Authentication
-├── pkg/vibe/            # VIBE config parser
-├── web/
-│   ├── templates/       # HTML templates
-│   └── static/          # Static assets
-├── gocast.vibe          # Example configuration
-└── README.md
+│   ├── auth/           # Authentication
+│   ├── config/         # Configuration parsing
+│   ├── server/         # HTTP server & routing
+│   ├── source/         # Source client handling
+│   ├── stats/          # Statistics collection
+│   └── stream/         # Buffer & mount management
+├── pkg/vibe/           # VIBE config parser
+├── docs/               # Documentation
+├── gocast.vibe         # Example configuration
+├── Dockerfile          # Container build
+└── docker-compose.yml  # Container orchestration
 ```
 
-## Contributing
+## 🤝 Contributing
 
-Contributions are welcome! Please read our contributing guidelines before submitting a PR.
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests
-5. Submit a pull request
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-## License
+## 📜 License
 
-MIT License - see LICENSE file for details.
+MIT License - see [LICENSE](LICENSE) for details.
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
-- Inspired by [Icecast](https://icecast.org/)
-- Configuration format: [VIBE](https://github.com/1ay1/vibe)
-- Thanks to all contributors!
+- Inspired by [Icecast](https://icecast.org/) - the original open source streaming server
+- Configuration powered by [VIBE](https://github.com/1ay1/vibe) - human-friendly config format
 
 ---
 
-**GoCast** - *Stream with confidence* 🎵
+<div align="center">
+
+**⭐ Star this repo if GoCast helps you stream!**
+
+Made with ❤️ and Go
+
+[Report Bug](https://github.com/1ay1/gocast/issues) •
+[Request Feature](https://github.com/1ay1/gocast/issues)
+
+</div>
