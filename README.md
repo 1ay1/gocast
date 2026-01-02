@@ -24,12 +24,13 @@
 | Feature | Icecast | GoCast |
 |---------|---------|--------|
 | Language | C | **Go** |
-| Config Format | XML 😱 | **[VIBE](https://github.com/1ay1/vibe)** 🌊 |
+| Config Format | XML 😱 | **JSON + Web UI** 🎛️ |
 | Memory Safety | Manual | **Automatic** |
 | Single Binary | ❌ | **✅** |
+| Web Admin Panel | Basic | **Full Featured** |
+| Hot Reload Config | ❌ | **✅** |
 | Docker Ready | Requires setup | **Native** |
 | CORS Support | Manual | **Built-in** |
-| Modern Codebase | 20+ years old | **Fresh & Clean** |
 
 ## ✨ Features
 
@@ -39,7 +40,8 @@
 - 🔀 **Multiple Mounts** - Host unlimited streams on a single server
 - 🛡️ **Built-in Security** - Authentication, IP filtering, SSL/TLS
 - 📈 **Live Statistics** - JSON/XML API compatible with existing tools
-- 🎛️ **Web Admin Panel** - Manage everything from your browser
+- 🎛️ **Web Admin Panel** - Configure everything from your browser - no restart needed!
+- 🔄 **Hot Reload** - All settings apply immediately without restart
 - 🐳 **Docker Ready** - Deploy anywhere in seconds
 
 ## 🚀 Quick Start
@@ -62,10 +64,20 @@ git clone https://github.com/1ay1/gocast.git && cd gocast && go build -o gocast 
 
   Modern Icecast Replacement - v1.0.0
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[GoCast] Loading configuration from gocast.vibe
+
+[GoCast] Starting in zero-config mode...
+╔════════════════════════════════════════════════════════════╗
+║              GOCAST FIRST-RUN SETUP                        ║
+╠════════════════════════════════════════════════════════════╣
+║  Admin Username: admin                                     ║
+║  Admin Password: xK9mP2vL8nQ4wR6j                         ║
+║                                                            ║
+║  ⚠️  SAVE THIS PASSWORD - IT WON'T BE SHOWN AGAIN!         ║
+║                                                            ║
+║  Open admin panel to complete setup and configure SSL      ║
+╚════════════════════════════════════════════════════════════╝
 [GoCast] GoCast is running on http://localhost:8000
-[GoCast] Admin interface: http://localhost:8000/admin/
-[GoCast] Starting GoCast HTTP server on 0.0.0.0:8000
+[GoCast] Admin panel: http://localhost:8000/admin/
 ```
 
 ### Start Streaming
@@ -73,7 +85,7 @@ git clone https://github.com/1ay1/gocast.git && cd gocast && go build -o gocast 
 ```bash
 # Stream with FFmpeg
 ffmpeg -re -i music.mp3 -c:a libmp3lame -b:a 320k -f mp3 \
-  icecast://source:hackme@localhost:8000/live
+  icecast://source:YOUR_SOURCE_PASSWORD@localhost:8000/live
 
 # Listen
 mpv http://localhost:8000/live
@@ -95,7 +107,7 @@ go build -o gocast ./cmd/gocast
 
 ```bash
 docker build -t gocast .
-docker run -p 8000:8000 gocast
+docker run -p 8000:8000 -v ~/.gocast:/root/.gocast gocast
 ```
 
 ### Docker Compose
@@ -106,31 +118,96 @@ docker-compose up -d
 
 ## 🔧 Configuration
 
-GoCast uses [VIBE](https://github.com/1ay1/vibe) - a human-friendly config format. No more XML nightmares!
+### How It Works
 
-```vibe
-# gocast.vibe - Simple and clean!
+GoCast stores all configuration in a single JSON file (`~/.gocast/config.json`). 
 
-server {
-    hostname myradio.example.com
-    port 8000
-}
+**All settings are managed through the Web Admin Panel** - just like Openfire, phpMyAdmin, or other modern server software. No need to edit config files manually!
 
-auth {
-    source_password super_secret_password
-    admin_user admin
-    admin_password admin_password
-}
+### First Run
 
-mounts {
-    live {
-        stream_name "My Awesome Radio"
-        genre "Electronic"
-        description "24/7 Best Beats"
-        max_listeners 1000
-        bitrate 320
+On first start, GoCast will:
+1. **Generate secure credentials** - Admin and source passwords shown once in console
+2. **Create a default `/live` mount** - Ready for streaming immediately
+3. **Start the admin panel** - Available at `http://localhost:8000/admin/`
+
+### Admin Panel Features
+
+The web-based admin panel lets you configure everything:
+
+- **Server Settings** - Hostname, port, location, server ID
+- **SSL/TLS** - One-click AutoSSL with Let's Encrypt, or manual certificates
+- **Limits** - Max clients, sources, buffer sizes, timeouts
+- **Authentication** - Admin and source passwords
+- **Mount Points** - Create, edit, delete streams with full metadata
+- **Logging** - Log level, file paths, buffer sizes
+- **Directory** - Yellow Pages / directory listing settings
+
+**All changes apply immediately** - no server restart required!
+
+### Manual Configuration (Power Users)
+
+If you prefer, you can edit the config file directly:
+
+**Location:** `~/.gocast/config.json`
+
+```json
+{
+  "version": 1,
+  "setup_complete": true,
+  "server": {
+    "hostname": "radio.example.com",
+    "listen_address": "0.0.0.0",
+    "port": 8000,
+    "location": "New York, USA",
+    "server_id": "MyRadio"
+  },
+  "ssl": {
+    "enabled": true,
+    "auto_ssl": true,
+    "port": 443,
+    "auto_ssl_email": "admin@example.com"
+  },
+  "limits": {
+    "max_clients": 500,
+    "max_sources": 10,
+    "queue_size": 131072,
+    "burst_size": 65536
+  },
+  "auth": {
+    "source_password": "your-source-password",
+    "admin_user": "admin",
+    "admin_password": "your-admin-password"
+  },
+  "mounts": {
+    "/live": {
+      "name": "/live",
+      "max_listeners": 100,
+      "genre": "Various",
+      "description": "24/7 Radio",
+      "public": true
     }
+  }
 }
+```
+
+After editing, use one of these methods to reload:
+- **Admin Panel:** Click "Reload from Disk" button
+- **Signal:** Send `SIGHUP` to the process (`kill -HUP <pid>`)
+
+### Command Line Options
+
+```
+./gocast [OPTIONS]
+
+OPTIONS:
+    -data <dir>    Data directory for config (default: ~/.gocast)
+    -version       Show version information
+    -help          Show help message
+
+SIGNALS:
+    SIGINT, SIGTERM   Graceful shutdown
+    SIGHUP            Hot reload configuration
 ```
 
 📖 [Full Configuration Reference →](docs/configuration.md)
@@ -149,7 +226,7 @@ ffmpeg -re -i playlist.m3u -c:a libmp3lame -b:a 320k -f mp3 \
 1. Server Type: **Icecast**
 2. Address: `localhost`
 3. Port: `8000`
-4. Password: `hackme`
+4. Password: *(your source password)*
 5. Mount: `/live`
 
 ### Liquidsoap
@@ -157,7 +234,7 @@ ffmpeg -re -i playlist.m3u -c:a libmp3lame -b:a 320k -f mp3 \
 ```liquidsoap
 output.icecast(%mp3(bitrate=320),
   host="localhost", port=8000,
-  password="hackme", mount="/live",
+  password="your-source-password", mount="/live",
   source)
 ```
 
@@ -183,20 +260,23 @@ http://localhost:8000/status?format=xml   → XML (Icecast compatible)
 
 ### Admin Panel
 ```
-http://localhost:8000/admin/    → Web interface
+http://localhost:8000/admin/    → Web interface (full configuration)
 ```
 
 ### Admin API
 
 ```bash
 # Update now playing
-curl -u admin:hackme "http://localhost:8000/admin/metadata?mount=/live&mode=updinfo&song=Artist%20-%20Song"
+curl -u admin:password "http://localhost:8000/admin/metadata?mount=/live&mode=updinfo&song=Artist%20-%20Song"
 
 # List listeners
-curl -u admin:hackme "http://localhost:8000/admin/listclients?mount=/live"
+curl -u admin:password "http://localhost:8000/admin/listclients?mount=/live"
 
 # Kick a listener
-curl -u admin:hackme "http://localhost:8000/admin/killclient?mount=/live&id=UUID"
+curl -u admin:password "http://localhost:8000/admin/killclient?mount=/live&id=UUID"
+
+# Get current config
+curl -u admin:password "http://localhost:8000/admin/config"
 ```
 
 📖 [Full API Reference →](docs/admin-api.md)
@@ -211,7 +291,6 @@ curl -u admin:hackme "http://localhost:8000/admin/killclient?mount=/live&id=UUID
 | [Listeners](docs/listeners.md) | Client compatibility and features |
 | [Admin API](docs/admin-api.md) | REST API documentation |
 | [Architecture](docs/architecture.md) | Internal design and data flow |
-| [VIBE Format](docs/vibe.md) | Configuration format guide |
 
 ## 🏗️ Project Structure
 
@@ -220,14 +299,12 @@ gocast/
 ├── cmd/gocast/          # Application entry point
 ├── internal/
 │   ├── auth/           # Authentication
-│   ├── config/         # Configuration parsing
-│   ├── server/         # HTTP server & routing
+│   ├── config/         # Configuration management (JSON)
+│   ├── server/         # HTTP server & admin panel
 │   ├── source/         # Source client handling
 │   ├── stats/          # Statistics collection
 │   └── stream/         # Buffer & mount management
-├── pkg/vibe/           # VIBE config parser
 ├── docs/               # Documentation
-├── gocast.vibe         # Example configuration
 ├── Dockerfile          # Container build
 └── docker-compose.yml  # Container orchestration
 ```
@@ -249,7 +326,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 ## 🙏 Acknowledgments
 
 - Inspired by [Icecast](https://icecast.org/) - the original open source streaming server
-- Configuration powered by [VIBE](https://github.com/1ay1/vibe) - human-friendly config format
 
 ---
 

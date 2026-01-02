@@ -1,4 +1,55 @@
-// Package config handles GoCast configuration loading and management
+// Package config handles GoCast configuration loading and management.
+//
+// # Configuration Architecture
+//
+// GoCast uses a single JSON configuration file (config.json) that stores
+// all settings. This file can be:
+//   - Edited via the Admin Panel (recommended)
+//   - Edited manually and hot-reloaded via admin panel or SIGHUP
+//
+// # Default Location
+//
+// The config file is stored at:
+//   - ~/.gocast/config.json (default)
+//   - Custom path via -data flag
+//
+// # Example config.json
+//
+//	{
+//	  "version": 1,
+//	  "setup_complete": true,
+//	  "server": {
+//	    "hostname": "radio.example.com",
+//	    "listen_address": "0.0.0.0",
+//	    "port": 8000
+//	  },
+//	  "ssl": {
+//	    "enabled": true,
+//	    "auto_ssl": true,
+//	    "port": 443
+//	  },
+//	  "limits": {
+//	    "max_clients": 500,
+//	    "max_sources": 10
+//	  },
+//	  "auth": {
+//	    "source_password": "secret",
+//	    "admin_user": "admin",
+//	    "admin_password": "secret"
+//	  },
+//	  "mounts": {
+//	    "/live": {
+//	      "name": "/live",
+//	      "max_listeners": 100,
+//	      "public": true
+//	    }
+//	  }
+//	}
+//
+// # Security Note
+//
+// The config file contains sensitive information (passwords). Ensure proper
+// file permissions (chmod 600) and keep backups secure.
 package config
 
 import (
@@ -13,95 +64,14 @@ import (
 	"time"
 )
 
-// RuntimeState represents the persisted runtime state from admin panel changes
-type RuntimeState struct {
-	// Version for state file format migrations
-	Version int `json:"version"`
-
-	// LastModified timestamp
-	LastModified time.Time `json:"last_modified"`
-
-	// Setup state for zero-config mode
-	SetupComplete bool   `json:"setup_complete"`
-	FirstRunToken string `json:"first_run_token,omitempty"`
-
-	// Server overrides
-	Server *ServerStateOverride `json:"server,omitempty"`
-
-	// SSL settings
-	SSL *SSLStateOverride `json:"ssl,omitempty"`
-
-	// Limits overrides
-	Limits *LimitsStateOverride `json:"limits,omitempty"`
-
-	// Auth overrides (admin credentials)
-	Auth *AuthStateOverride `json:"auth,omitempty"`
-
-	// Mount configurations (full replacement, not merge)
-	Mounts map[string]*MountConfig `json:"mounts,omitempty"`
-
-	// Logging overrides
-	Logging *LoggingStateOverride `json:"logging,omitempty"`
-}
-
-// ServerStateOverride contains server settings that can be changed at runtime
-type ServerStateOverride struct {
-	Hostname *string `json:"hostname,omitempty"`
-	Port     *int    `json:"port,omitempty"`
-	Location *string `json:"location,omitempty"`
-	ServerID *string `json:"server_id,omitempty"`
-}
-
-// SSLStateOverride contains SSL settings that can be changed at runtime
-type SSLStateOverride struct {
-	Enabled      *bool   `json:"enabled,omitempty"`
-	Port         *int    `json:"port,omitempty"`
-	AutoSSL      *bool   `json:"auto_ssl,omitempty"`
-	AutoSSLEmail *string `json:"auto_ssl_email,omitempty"`
-	CertPath     *string `json:"cert_path,omitempty"`
-	KeyPath      *string `json:"key_path,omitempty"`
-	CacheDir     *string `json:"cache_dir,omitempty"`
-}
-
-// LimitsStateOverride contains limit settings that can be changed at runtime
-type LimitsStateOverride struct {
-	MaxClients           *int `json:"max_clients,omitempty"`
-	MaxSources           *int `json:"max_sources,omitempty"`
-	MaxListenersPerMount *int `json:"max_listeners_per_mount,omitempty"`
-	QueueSize            *int `json:"queue_size,omitempty"`
-	BurstSize            *int `json:"burst_size,omitempty"`
-}
-
-// AuthStateOverride contains auth settings that can be changed at runtime
-type AuthStateOverride struct {
-	SourcePassword *string `json:"source_password,omitempty"`
-	AdminUser      *string `json:"admin_user,omitempty"`
-	AdminPassword  *string `json:"admin_password,omitempty"`
-}
-
-// LoggingStateOverride contains logging settings that can be changed at runtime
-type LoggingStateOverride struct {
-	LogLevel *string `json:"log_level,omitempty"`
-}
-
-// ConfigManager handles configuration with state persistence
+// ConfigManager handles configuration with hot reload support
 type ConfigManager struct {
-	// Base configuration from file
-	baseConfig *Config
+	// Current configuration
+	config *Config
 
-	// Runtime state (overrides)
-	state *RuntimeState
-
-	// Merged configuration (base + state)
-	mergedConfig *Config
-
-	// File paths
+	// File path
 	configPath string
-	statePath  string
 	dataDir    string
-
-	// Zero-config mode (no config file)
-	zeroConfigMode bool
 
 	// Logger
 	logger *log.Logger
@@ -117,47 +87,7 @@ type ConfigManager struct {
 }
 
 // NewConfigManager creates a new configuration manager
-func NewConfigManager(configPath string) (*ConfigManager, error) {
-	return NewConfigManagerWithLogger(configPath, nil)
-}
-
-// NewConfigManagerWithLogger creates a new configuration manager with a logger
-func NewConfigManagerWithLogger(configPath string, logger *log.Logger) (*ConfigManager, error) {
-	if logger == nil {
-		logger = log.Default()
-	}
-
-	cm := &ConfigManager{
-		configPath:      configPath,
-		statePath:       getStatePath(configPath),
-		state:           newEmptyState(),
-		changeCallbacks: make([]func(*Config), 0),
-		logger:          logger,
-	}
-
-	// Load base configuration
-	if err := cm.loadBaseConfig(); err != nil {
-		return nil, fmt.Errorf("failed to load base config: %w", err)
-	}
-
-	// Load state file (if exists)
-	if err := cm.loadState(); err != nil {
-		if !os.IsNotExist(err) {
-			// State file errors are not fatal - just log and continue with empty state
-			logger.Printf("Warning: could not load state file: %v\n", err)
-		}
-		cm.state = newEmptyState()
-	}
-
-	// Merge configs
-	cm.mergeConfigs()
-
-	return cm, nil
-}
-
-// NewZeroConfigManager creates a configuration manager without a config file
-// All settings are persisted to state.json in the data directory
-func NewZeroConfigManager(dataDir string, logger *log.Logger) (*ConfigManager, error) {
+func NewConfigManager(dataDir string, logger *log.Logger) (*ConfigManager, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -168,98 +98,90 @@ func NewZeroConfigManager(dataDir string, logger *log.Logger) (*ConfigManager, e
 	}
 
 	// Ensure data directory exists
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
-	statePath := filepath.Join(dataDir, "config.json")
+	configPath := filepath.Join(dataDir, "config.json")
 
 	cm := &ConfigManager{
-		configPath:      "",
-		statePath:       statePath,
+		configPath:      configPath,
 		dataDir:         dataDir,
-		zeroConfigMode:  true,
-		state:           newEmptyState(),
-		baseConfig:      DefaultConfig(),
+		config:          DefaultConfig(),
 		changeCallbacks: make([]func(*Config), 0),
 		logger:          logger,
 	}
 
-	// Load state file (if exists)
-	err := cm.loadState()
-	if err != nil {
-		if os.IsNotExist(err) {
-			// First run - create initial secure config
-			cm.state = cm.createInitialState()
-			if saveErr := cm.saveState(); saveErr != nil {
-				return nil, fmt.Errorf("failed to save initial state: %w", saveErr)
-			}
-
-			// Show first-run credentials
-			cm.showFirstRunCredentials()
-		} else {
-			// Actual error loading state
-			logger.Printf("Warning: could not load state file: %v", err)
-			cm.state = newEmptyState()
+	// Try to load existing config
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// First run - create initial config
+		cm.config = cm.createInitialConfig()
+		if err := cm.save(); err != nil {
+			return nil, fmt.Errorf("failed to save initial config: %w", err)
+		}
+		cm.showFirstRunCredentials()
+	} else {
+		// Load existing config
+		if err := cm.load(); err != nil {
+			logger.Printf("WARNING: Failed to load config, using defaults: %v", err)
+			cm.config = DefaultConfig()
 		}
 	}
-
-	// Merge configs
-	cm.mergeConfigs()
 
 	return cm, nil
 }
 
-// getDefaultDataDir returns the default data directory based on OS
+// getDefaultDataDir returns the default data directory path
 func getDefaultDataDir() string {
-	// Try common locations in order
-	locations := []string{
-		"/var/lib/gocast",
-		filepath.Join(os.Getenv("HOME"), ".gocast"),
-		"./data",
-	}
-
-	for _, loc := range locations {
-		if err := os.MkdirAll(loc, 0700); err == nil {
-			return loc
-		}
+	// Try user home directory first
+	home, err := os.UserHomeDir()
+	if err == nil {
+		return filepath.Join(home, ".gocast")
 	}
 
 	// Fallback to current directory
-	return "./data"
+	return ".gocast"
 }
 
-// createInitialState creates secure initial state for first run
-func (cm *ConfigManager) createInitialState() *RuntimeState {
-	state := newEmptyState()
-	state.SetupComplete = false
-	state.FirstRunToken = generateSecureToken(32)
+// createInitialConfig creates a new config with secure generated credentials
+func (cm *ConfigManager) createInitialConfig() *Config {
+	cfg := DefaultConfig()
+	cfg.SetupComplete = false
 
 	// Generate secure admin password
 	adminPassword := generateSecurePassword(16)
 	cm.initialAdminPassword = adminPassword
 
-	state.Auth = &AuthStateOverride{
-		AdminUser:      strPtr("admin"),
-		AdminPassword:  strPtr(adminPassword),
-		SourcePassword: strPtr(generateSecurePassword(12)),
-	}
+	cfg.Auth.AdminUser = "admin"
+	cfg.Auth.AdminPassword = adminPassword
+	cfg.Admin.User = "admin"
+	cfg.Admin.Password = adminPassword
+
+	// Generate secure source password
+	cfg.Auth.SourcePassword = generateSecurePassword(12)
 
 	// Create default mount
-	state.Mounts = map[string]*MountConfig{
+	cfg.Mounts = map[string]*MountConfig{
 		"/live": {
 			Name:         "/live",
-			MaxListeners: 100,
+			MaxListeners: cfg.Limits.MaxListenersPerMount,
+			Genre:        "Various",
+			Description:  "GoCast Stream",
+			Bitrate:      128,
 			Type:         "audio/mpeg",
 			Public:       true,
 			StreamName:   "Live Stream",
+			BurstSize:    cfg.Limits.BurstSize,
 		},
 	}
 
-	return state
+	// Set default SSL cache directory
+	cfg.SSL.CacheDir = filepath.Join(cm.dataDir, "certs")
+
+	return cfg
 }
 
-// showFirstRunCredentials displays the initial credentials
+// showFirstRunCredentials displays the initial credentials to the user
 func (cm *ConfigManager) showFirstRunCredentials() {
 	cm.logger.Println("╔════════════════════════════════════════════════════════════╗")
 	cm.logger.Println("║              GOCAST FIRST-RUN SETUP                        ║")
@@ -273,288 +195,185 @@ func (cm *ConfigManager) showFirstRunCredentials() {
 	cm.logger.Println("╚════════════════════════════════════════════════════════════╝")
 }
 
-// GetInitialAdminPassword returns the initial admin password (only on first run)
+// GetInitialAdminPassword returns the initial admin password (only available on first run)
 func (cm *ConfigManager) GetInitialAdminPassword() string {
 	return cm.initialAdminPassword
 }
 
-// IsZeroConfigMode returns true if running without a config file
-func (cm *ConfigManager) IsZeroConfigMode() bool {
-	return cm.zeroConfigMode
+// GetDataDir returns the data directory path
+func (cm *ConfigManager) GetDataDir() string {
+	return cm.dataDir
 }
 
-// IsSetupComplete returns true if initial setup is complete
+// GetConfigPath returns the config file path
+func (cm *ConfigManager) GetConfigPath() string {
+	return cm.configPath
+}
+
+// IsSetupComplete returns whether initial setup has been completed
 func (cm *ConfigManager) IsSetupComplete() bool {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	return cm.state.SetupComplete
+	return cm.config.SetupComplete
 }
 
-// CompleteSetup marks initial setup as complete
+// CompleteSetup marks the initial setup as complete
 func (cm *ConfigManager) CompleteSetup() error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	cm.state.SetupComplete = true
-	cm.state.FirstRunToken = "" // Clear the token
-
-	return cm.saveState()
+	cm.config.SetupComplete = true
+	return cm.saveUnlocked()
 }
 
-// GetDataDir returns the data directory path
-func (cm *ConfigManager) GetDataDir() string {
-	if cm.dataDir != "" {
-		return cm.dataDir
-	}
-	return filepath.Dir(cm.statePath)
-}
-
-// generateSecurePassword generates a cryptographically secure random password
-func generateSecurePassword(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
-	bytes := make([]byte, length)
-	rand.Read(bytes)
-	for i := range bytes {
-		bytes[i] = charset[int(bytes[i])%len(charset)]
-	}
-	return string(bytes)
-}
-
-// generateSecureToken generates a secure random hex token
-func generateSecureToken(length int) string {
-	bytes := make([]byte, length)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
-}
-
-// strPtr returns a pointer to a string
-func strPtr(s string) *string {
-	return &s
-}
-
-// intPtr returns a pointer to an int
-func intPtr(i int) *int {
-	return &i
-}
-
-// boolPtr returns a pointer to a bool
-func boolPtr(b bool) *bool {
-	return &b
-}
-
-// getStatePath derives the state file path from config path
-func getStatePath(configPath string) string {
-	dir := filepath.Dir(configPath)
-	return filepath.Join(dir, "state.json")
-}
-
-// newEmptyState creates a new empty runtime state
-func newEmptyState() *RuntimeState {
-	return &RuntimeState{
-		Version:      1,
-		LastModified: time.Now(),
-		Mounts:       make(map[string]*MountConfig),
-	}
-}
-
-// loadBaseConfig loads the base configuration from file
-func (cm *ConfigManager) loadBaseConfig() error {
-	if _, err := os.Stat(cm.configPath); os.IsNotExist(err) {
-		cm.baseConfig = DefaultConfig()
-		return nil
-	}
-
-	cfg, err := Load(cm.configPath)
+// load reads configuration from disk
+func (cm *ConfigManager) load() error {
+	data, err := os.ReadFile(cm.configPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	cm.baseConfig = cfg
+	cfg := DefaultConfig()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		// Config is corrupted - backup and report error
+		cm.backupCorruptedConfig(data)
+		return fmt.Errorf("config file corrupted (backup created): %w", err)
+	}
+
+	// Validate and fix any issues
+	cm.validateAndFix(cfg)
+
+	// Convert seconds to durations
+	cfg.normalizeDurations()
+
+	// Ensure mounts map exists
+	if cfg.Mounts == nil {
+		cfg.Mounts = make(map[string]*MountConfig)
+	}
+
+	cm.config = cfg
 	return nil
 }
 
-// loadState loads the runtime state from file
-func (cm *ConfigManager) loadState() error {
-	if _, err := os.Stat(cm.statePath); os.IsNotExist(err) {
-		return os.ErrNotExist // Return error to signal first run
-	}
+// save persists configuration to disk (requires lock held)
+func (cm *ConfigManager) save() error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	return cm.saveUnlocked()
+}
 
-	data, err := os.ReadFile(cm.statePath)
+// saveUnlocked persists configuration to disk (caller must hold lock)
+func (cm *ConfigManager) saveUnlocked() error {
+	cm.config.LastModified = time.Now()
+
+	// Ensure seconds fields are updated
+	cm.config.normalizeSeconds()
+
+	data, err := json.MarshalIndent(cm.config, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	state := &RuntimeState{}
-	if err := json.Unmarshal(data, state); err != nil {
-		return err
+	// Ensure directory exists
+	dir := filepath.Dir(cm.configPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	cm.state = state
+	// Atomic write: write to temp file then rename
+	tempPath := cm.configPath + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write temp config file: %w", err)
+	}
+
+	if err := os.Rename(tempPath, cm.configPath); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to save config file: %w", err)
+	}
+
 	return nil
 }
 
-// saveState persists the runtime state to file
-func (cm *ConfigManager) saveState() error {
-	cm.state.LastModified = time.Now()
+// backupCorruptedConfig creates a backup of a corrupted config file
+func (cm *ConfigManager) backupCorruptedConfig(data []byte) {
+	backupPath := cm.configPath + ".corrupted." + time.Now().Format("20060102-150405")
+	if err := os.WriteFile(backupPath, data, 0600); err != nil {
+		cm.logger.Printf("WARNING: Failed to backup corrupted config: %v", err)
+	} else {
+		cm.logger.Printf("Corrupted config backed up to: %s", backupPath)
+	}
+}
 
-	data, err := json.MarshalIndent(cm.state, "", "  ")
-	if err != nil {
+// validateAndFix validates configuration and fixes any issues
+func (cm *ConfigManager) validateAndFix(cfg *Config) {
+	// Fix invalid limits
+	if cfg.Limits.MaxClients <= 0 {
+		cm.logger.Println("WARNING: Invalid max_clients, setting to 100")
+		cfg.Limits.MaxClients = 100
+	}
+	if cfg.Limits.MaxSources <= 0 {
+		cm.logger.Println("WARNING: Invalid max_sources, setting to 10")
+		cfg.Limits.MaxSources = 10
+	}
+	if cfg.Limits.QueueSize < 1024 {
+		cm.logger.Println("WARNING: queue_size too small, setting to 1024")
+		cfg.Limits.QueueSize = 1024
+	}
+
+	// Fix invalid ports
+	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
+		cm.logger.Println("WARNING: Invalid server port, setting to 8000")
+		cfg.Server.Port = 8000
+	}
+	if cfg.SSL.Port <= 0 || cfg.SSL.Port > 65535 {
+		cm.logger.Println("WARNING: Invalid SSL port, setting to 443")
+		cfg.SSL.Port = 443
+	}
+
+	// Fix missing auth
+	if cfg.Auth.AdminUser == "" {
+		cfg.Auth.AdminUser = "admin"
+	}
+	if cfg.Auth.AdminPassword == "" {
+		cfg.Auth.AdminPassword = generateSecurePassword(16)
+		cm.logger.Printf("WARNING: No admin password set, generated: %s", cfg.Auth.AdminPassword)
+	}
+
+	// Sync admin config
+	cfg.Admin.User = cfg.Auth.AdminUser
+	cfg.Admin.Password = cfg.Auth.AdminPassword
+
+	// Ensure version is set
+	if cfg.Version == 0 {
+		cfg.Version = 1
+	}
+}
+
+// Reload reloads configuration from disk (hot reload)
+func (cm *ConfigManager) Reload() error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if err := cm.load(); err != nil {
 		return err
 	}
 
-	return os.WriteFile(cm.statePath, data, 0644)
+	cm.notifyChange()
+	return nil
 }
 
-// mergeConfigs merges base config with state overrides
-func (cm *ConfigManager) mergeConfigs() {
-	// Start with a copy of base config
-	merged := cm.copyConfig(cm.baseConfig)
-
-	// Apply server overrides
-	if cm.state.Server != nil {
-		if cm.state.Server.Hostname != nil {
-			merged.Server.Hostname = *cm.state.Server.Hostname
-		}
-		if cm.state.Server.Port != nil {
-			merged.Server.Port = *cm.state.Server.Port
-		}
-		if cm.state.Server.Location != nil {
-			merged.Server.Location = *cm.state.Server.Location
-		}
-		if cm.state.Server.ServerID != nil {
-			merged.Server.ServerID = *cm.state.Server.ServerID
-		}
-	}
-
-	// Apply SSL overrides
-	if cm.state.SSL != nil {
-		if cm.state.SSL.Enabled != nil {
-			merged.Server.SSLEnabled = *cm.state.SSL.Enabled
-		}
-		if cm.state.SSL.Port != nil {
-			merged.Server.SSLPort = *cm.state.SSL.Port
-		}
-		if cm.state.SSL.AutoSSL != nil {
-			merged.Server.AutoSSL = *cm.state.SSL.AutoSSL
-		}
-		if cm.state.SSL.AutoSSLEmail != nil {
-			merged.Server.AutoSSLEmail = *cm.state.SSL.AutoSSLEmail
-		}
-		if cm.state.SSL.CertPath != nil {
-			merged.Server.SSLCert = *cm.state.SSL.CertPath
-		}
-		if cm.state.SSL.KeyPath != nil {
-			merged.Server.SSLKey = *cm.state.SSL.KeyPath
-		}
-		if cm.state.SSL.CacheDir != nil {
-			merged.Server.AutoSSLCache = *cm.state.SSL.CacheDir
-		}
-	}
-
-	// Apply limits overrides
-	if cm.state.Limits != nil {
-		if cm.state.Limits.MaxClients != nil {
-			merged.Limits.MaxClients = *cm.state.Limits.MaxClients
-		}
-		if cm.state.Limits.MaxSources != nil {
-			merged.Limits.MaxSources = *cm.state.Limits.MaxSources
-		}
-		if cm.state.Limits.MaxListenersPerMount != nil {
-			merged.Limits.MaxListenersPerMount = *cm.state.Limits.MaxListenersPerMount
-		}
-		if cm.state.Limits.QueueSize != nil {
-			merged.Limits.QueueSize = *cm.state.Limits.QueueSize
-		}
-		if cm.state.Limits.BurstSize != nil {
-			merged.Limits.BurstSize = *cm.state.Limits.BurstSize
-		}
-	}
-
-	// Apply auth overrides
-	if cm.state.Auth != nil {
-		if cm.state.Auth.SourcePassword != nil {
-			merged.Auth.SourcePassword = *cm.state.Auth.SourcePassword
-		}
-		if cm.state.Auth.AdminUser != nil {
-			merged.Admin.User = *cm.state.Auth.AdminUser
-			merged.Auth.AdminUser = *cm.state.Auth.AdminUser
-		}
-		if cm.state.Auth.AdminPassword != nil {
-			merged.Admin.Password = *cm.state.Auth.AdminPassword
-			merged.Auth.AdminPassword = *cm.state.Auth.AdminPassword
-		}
-	}
-
-	// Apply logging overrides
-	if cm.state.Logging != nil {
-		if cm.state.Logging.LogLevel != nil {
-			merged.Logging.LogLevel = *cm.state.Logging.LogLevel
-		}
-	}
-
-	// Apply mount overrides - mounts from state completely replace base mounts
-	if len(cm.state.Mounts) > 0 {
-		merged.Mounts = make(map[string]*MountConfig)
-		for path, mount := range cm.state.Mounts {
-			merged.Mounts[path] = cm.copyMountConfig(mount)
-		}
-	}
-
-	cm.mergedConfig = merged
-}
-
-// copyConfig creates a deep copy of a Config
-func (cm *ConfigManager) copyConfig(src *Config) *Config {
-	dst := &Config{
-		Server:    src.Server,
-		Limits:    src.Limits,
-		Auth:      src.Auth,
-		Logging:   src.Logging,
-		Admin:     src.Admin,
-		Directory: src.Directory,
-		Mounts:    make(map[string]*MountConfig),
-	}
-
-	for path, mount := range src.Mounts {
-		dst.Mounts[path] = cm.copyMountConfig(mount)
-	}
-
-	return dst
-}
-
-// copyMountConfig creates a deep copy of a MountConfig
-func (cm *ConfigManager) copyMountConfig(src *MountConfig) *MountConfig {
-	dst := *src
-	if src.AllowedIPs != nil {
-		dst.AllowedIPs = make([]string, len(src.AllowedIPs))
-		copy(dst.AllowedIPs, src.AllowedIPs)
-	}
-	if src.DeniedIPs != nil {
-		dst.DeniedIPs = make([]string, len(src.DeniedIPs))
-		copy(dst.DeniedIPs, src.DeniedIPs)
-	}
-	return &dst
-}
-
-// GetConfig returns the current merged configuration
+// GetConfig returns the current configuration (read-only copy)
 func (cm *ConfigManager) GetConfig() *Config {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	return cm.mergedConfig
+	return cm.config.Clone()
 }
 
-// GetBaseConfig returns the base configuration (from file)
-func (cm *ConfigManager) GetBaseConfig() *Config {
+// GetConfigDirect returns a direct pointer to the config (use carefully)
+func (cm *ConfigManager) GetConfigDirect() *Config {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	return cm.baseConfig
-}
-
-// GetState returns the current runtime state
-func (cm *ConfigManager) GetState() *RuntimeState {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	return cm.state
+	return cm.config
 }
 
 // OnChange registers a callback for configuration changes
@@ -567,34 +386,37 @@ func (cm *ConfigManager) OnChange(callback func(*Config)) {
 // notifyChange notifies all registered callbacks of a config change
 func (cm *ConfigManager) notifyChange() {
 	for _, cb := range cm.changeCallbacks {
-		go cb(cm.mergedConfig)
+		go cb(cm.config.Clone())
 	}
 }
 
-// UpdateServer updates server configuration
-func (cm *ConfigManager) UpdateServer(hostname, location, serverID *string, port *int) error {
+// ----- Update Methods -----
+
+// UpdateServer updates server configuration (changes apply immediately)
+func (cm *ConfigManager) UpdateServer(hostname, location, serverID, listenAddress, adminRoot *string, port *int) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-
-	if cm.state.Server == nil {
-		cm.state.Server = &ServerStateOverride{}
-	}
 
 	if hostname != nil {
-		cm.state.Server.Hostname = hostname
-	}
-	if port != nil {
-		cm.state.Server.Port = port
+		cm.config.Server.Hostname = *hostname
 	}
 	if location != nil {
-		cm.state.Server.Location = location
+		cm.config.Server.Location = *location
 	}
 	if serverID != nil {
-		cm.state.Server.ServerID = serverID
+		cm.config.Server.ServerID = *serverID
+	}
+	if listenAddress != nil {
+		cm.config.Server.ListenAddress = *listenAddress
+	}
+	if adminRoot != nil {
+		cm.config.Server.AdminRoot = *adminRoot
+	}
+	if port != nil {
+		cm.config.Server.Port = *port
 	}
 
-	cm.mergeConfigs()
-	if err := cm.saveState(); err != nil {
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
@@ -602,39 +424,31 @@ func (cm *ConfigManager) UpdateServer(hostname, location, serverID *string, port
 	return nil
 }
 
-// UpdateSSL updates SSL configuration
-func (cm *ConfigManager) UpdateSSL(enabled, autoSSL *bool, port *int, email, certPath, keyPath, cacheDir *string) error {
+// UpdateSSL updates SSL configuration (changes apply immediately)
+func (cm *ConfigManager) UpdateSSL(enabled, autoSSL *bool, port *int, email, certPath, keyPath *string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	if cm.state.SSL == nil {
-		cm.state.SSL = &SSLStateOverride{}
-	}
-
 	if enabled != nil {
-		cm.state.SSL.Enabled = enabled
+		cm.config.SSL.Enabled = *enabled
 	}
 	if autoSSL != nil {
-		cm.state.SSL.AutoSSL = autoSSL
+		cm.config.SSL.AutoSSL = *autoSSL
 	}
 	if port != nil {
-		cm.state.SSL.Port = port
+		cm.config.SSL.Port = *port
 	}
 	if email != nil {
-		cm.state.SSL.AutoSSLEmail = email
+		cm.config.SSL.AutoSSLEmail = *email
 	}
 	if certPath != nil {
-		cm.state.SSL.CertPath = certPath
+		cm.config.SSL.CertPath = *certPath
 	}
 	if keyPath != nil {
-		cm.state.SSL.KeyPath = keyPath
-	}
-	if cacheDir != nil {
-		cm.state.SSL.CacheDir = cacheDir
+		cm.config.SSL.KeyPath = *keyPath
 	}
 
-	cm.mergeConfigs()
-	if err := cm.saveState(); err != nil {
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
@@ -642,58 +456,76 @@ func (cm *ConfigManager) UpdateSSL(enabled, autoSSL *bool, port *int, email, cer
 	return nil
 }
 
-// EnableAutoSSL enables automatic SSL with Let's Encrypt
+// EnableAutoSSL enables automatic SSL with Let's Encrypt (applies immediately)
 func (cm *ConfigManager) EnableAutoSSL(hostname, email string) error {
-	// Update hostname first
-	if err := cm.UpdateServer(&hostname, nil, nil, nil); err != nil {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	cm.config.Server.Hostname = hostname
+	cm.config.SSL.Enabled = true
+	cm.config.SSL.AutoSSL = true
+	cm.config.SSL.Port = 443
+	cm.config.SSL.AutoSSLEmail = email
+	cm.config.SSL.CacheDir = filepath.Join(cm.dataDir, "certs")
+
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
-	// Set default cache directory
-	cacheDir := filepath.Join(cm.GetDataDir(), "certs")
-
-	// Enable AutoSSL
-	enabled := true
-	autoSSL := true
-	port := 443
-
-	return cm.UpdateSSL(&enabled, &autoSSL, &port, &email, nil, nil, &cacheDir)
+	cm.notifyChange()
+	return nil
 }
 
-// DisableSSL disables SSL
+// DisableSSL disables SSL (applies immediately)
 func (cm *ConfigManager) DisableSSL() error {
-	enabled := false
-	autoSSL := false
-	return cm.UpdateSSL(&enabled, &autoSSL, nil, nil, nil, nil, nil)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	cm.config.SSL.Enabled = false
+	cm.config.SSL.AutoSSL = false
+
+	if err := cm.saveUnlocked(); err != nil {
+		return err
+	}
+
+	cm.notifyChange()
+	return nil
 }
 
 // UpdateLimits updates limits configuration
-func (cm *ConfigManager) UpdateLimits(maxClients, maxSources, maxListenersPerMount, queueSize, burstSize *int) error {
+func (cm *ConfigManager) UpdateLimits(maxClients, maxSources, maxListenersPerMount, queueSize, burstSize, clientTimeout, headerTimeout, sourceTimeout *int) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	if cm.state.Limits == nil {
-		cm.state.Limits = &LimitsStateOverride{}
-	}
-
 	if maxClients != nil {
-		cm.state.Limits.MaxClients = maxClients
+		cm.config.Limits.MaxClients = *maxClients
 	}
 	if maxSources != nil {
-		cm.state.Limits.MaxSources = maxSources
+		cm.config.Limits.MaxSources = *maxSources
 	}
 	if maxListenersPerMount != nil {
-		cm.state.Limits.MaxListenersPerMount = maxListenersPerMount
+		cm.config.Limits.MaxListenersPerMount = *maxListenersPerMount
 	}
 	if queueSize != nil {
-		cm.state.Limits.QueueSize = queueSize
+		cm.config.Limits.QueueSize = *queueSize
 	}
 	if burstSize != nil {
-		cm.state.Limits.BurstSize = burstSize
+		cm.config.Limits.BurstSize = *burstSize
+	}
+	if clientTimeout != nil {
+		cm.config.Limits.ClientTimeoutSeconds = *clientTimeout
+		cm.config.Limits.ClientTimeout = time.Duration(*clientTimeout) * time.Second
+	}
+	if headerTimeout != nil {
+		cm.config.Limits.HeaderTimeoutSeconds = *headerTimeout
+		cm.config.Limits.HeaderTimeout = time.Duration(*headerTimeout) * time.Second
+	}
+	if sourceTimeout != nil {
+		cm.config.Limits.SourceTimeoutSeconds = *sourceTimeout
+		cm.config.Limits.SourceTimeout = time.Duration(*sourceTimeout) * time.Second
 	}
 
-	cm.mergeConfigs()
-	if err := cm.saveState(); err != nil {
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
@@ -706,22 +538,19 @@ func (cm *ConfigManager) UpdateAuth(sourcePassword, adminUser, adminPassword *st
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	if cm.state.Auth == nil {
-		cm.state.Auth = &AuthStateOverride{}
-	}
-
 	if sourcePassword != nil {
-		cm.state.Auth.SourcePassword = sourcePassword
+		cm.config.Auth.SourcePassword = *sourcePassword
 	}
 	if adminUser != nil {
-		cm.state.Auth.AdminUser = adminUser
+		cm.config.Auth.AdminUser = *adminUser
+		cm.config.Admin.User = *adminUser
 	}
 	if adminPassword != nil {
-		cm.state.Auth.AdminPassword = adminPassword
+		cm.config.Auth.AdminPassword = *adminPassword
+		cm.config.Admin.Password = *adminPassword
 	}
 
-	cm.mergeConfigs()
-	if err := cm.saveState(); err != nil {
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
@@ -729,27 +558,57 @@ func (cm *ConfigManager) UpdateAuth(sourcePassword, adminUser, adminPassword *st
 	return nil
 }
 
-// UpdateLogging updates logging configuration
-func (cm *ConfigManager) UpdateLogging(logLevel *string) error {
+// UpdateLogging updates logging configuration (applies immediately)
+func (cm *ConfigManager) UpdateLogging(logLevel, accessLog, errorLog *string, logSize *int) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	if cm.state.Logging == nil {
-		cm.state.Logging = &LoggingStateOverride{}
-	}
-
 	if logLevel != nil {
-		cm.state.Logging.LogLevel = logLevel
+		cm.config.Logging.LogLevel = *logLevel
+	}
+	if accessLog != nil {
+		cm.config.Logging.AccessLog = *accessLog
+	}
+	if errorLog != nil {
+		cm.config.Logging.ErrorLog = *errorLog
+	}
+	if logSize != nil {
+		cm.config.Logging.LogSize = *logSize
 	}
 
-	cm.mergeConfigs()
-	if err := cm.saveState(); err != nil {
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
 	cm.notifyChange()
 	return nil
 }
+
+// UpdateDirectory updates directory/YP configuration
+func (cm *ConfigManager) UpdateDirectory(enabled *bool, ypURLs []string, interval *int) error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if enabled != nil {
+		cm.config.Directory.Enabled = *enabled
+	}
+	if ypURLs != nil {
+		cm.config.Directory.YPURLs = ypURLs
+	}
+	if interval != nil {
+		cm.config.Directory.IntervalSeconds = *interval
+		cm.config.Directory.Interval = time.Duration(*interval) * time.Second
+	}
+
+	if err := cm.saveUnlocked(); err != nil {
+		return err
+	}
+
+	cm.notifyChange()
+	return nil
+}
+
+// ----- Mount Management -----
 
 // CreateMount creates a new mount configuration
 func (cm *ConfigManager) CreateMount(path string, mount *MountConfig) error {
@@ -762,22 +621,14 @@ func (cm *ConfigManager) CreateMount(path string, mount *MountConfig) error {
 	}
 
 	// Check if mount already exists
-	if _, exists := cm.state.Mounts[path]; exists {
+	if _, exists := cm.config.Mounts[path]; exists {
 		return fmt.Errorf("mount %s already exists", path)
 	}
 
-	// If this is the first mount in state, copy all base mounts first
-	if len(cm.state.Mounts) == 0 && len(cm.baseConfig.Mounts) > 0 {
-		for p, m := range cm.baseConfig.Mounts {
-			cm.state.Mounts[p] = cm.copyMountConfig(m)
-		}
-	}
-
 	mount.Name = path
-	cm.state.Mounts[path] = mount
+	cm.config.Mounts[path] = mount
 
-	cm.mergeConfigs()
-	if err := cm.saveState(); err != nil {
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
@@ -795,18 +646,10 @@ func (cm *ConfigManager) UpdateMount(path string, mount *MountConfig) error {
 		path = "/" + path
 	}
 
-	// If this is the first update in state, copy all base mounts first
-	if len(cm.state.Mounts) == 0 && len(cm.baseConfig.Mounts) > 0 {
-		for p, m := range cm.baseConfig.Mounts {
-			cm.state.Mounts[p] = cm.copyMountConfig(m)
-		}
-	}
-
 	mount.Name = path
-	cm.state.Mounts[path] = mount
+	cm.config.Mounts[path] = mount
 
-	cm.mergeConfigs()
-	if err := cm.saveState(); err != nil {
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
@@ -824,17 +667,9 @@ func (cm *ConfigManager) DeleteMount(path string) error {
 		path = "/" + path
 	}
 
-	// If this is the first delete in state, copy all base mounts first
-	if len(cm.state.Mounts) == 0 && len(cm.baseConfig.Mounts) > 0 {
-		for p, m := range cm.baseConfig.Mounts {
-			cm.state.Mounts[p] = cm.copyMountConfig(m)
-		}
-	}
+	delete(cm.config.Mounts, path)
 
-	delete(cm.state.Mounts, path)
-
-	cm.mergeConfigs()
-	if err := cm.saveState(); err != nil {
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
@@ -847,7 +682,7 @@ func (cm *ConfigManager) GetMount(path string) *MountConfig {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	if mount, exists := cm.mergedConfig.Mounts[path]; exists {
+	if mount, exists := cm.config.Mounts[path]; exists {
 		return mount
 	}
 	return nil
@@ -859,22 +694,34 @@ func (cm *ConfigManager) GetAllMounts() map[string]*MountConfig {
 	defer cm.mu.RUnlock()
 
 	result := make(map[string]*MountConfig)
-	for path, mount := range cm.mergedConfig.Mounts {
-		result[path] = cm.copyMountConfig(mount)
+	for path, mount := range cm.config.Mounts {
+		// Create a copy
+		mountCopy := *mount
+		result[path] = &mountCopy
 	}
 	return result
 }
 
-// ResetToDefaults resets all runtime state to base config defaults
+// ----- Other Methods -----
+
+// ResetToDefaults resets configuration to defaults (preserving credentials)
 func (cm *ConfigManager) ResetToDefaults() error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	cm.state = newEmptyState()
-	cm.mergeConfigs()
+	// Save current auth
+	oldAuth := cm.config.Auth
+	oldAdmin := cm.config.Admin
 
-	// Remove state file
-	if err := os.Remove(cm.statePath); err != nil && !os.IsNotExist(err) {
+	// Reset to defaults
+	cm.config = DefaultConfig()
+
+	// Restore auth
+	cm.config.Auth = oldAuth
+	cm.config.Admin = oldAdmin
+	cm.config.SetupComplete = true
+
+	if err := cm.saveUnlocked(); err != nil {
 		return err
 	}
 
@@ -882,36 +729,36 @@ func (cm *ConfigManager) ResetToDefaults() error {
 	return nil
 }
 
-// ReloadBaseConfig reloads the base configuration from file
-func (cm *ConfigManager) ReloadBaseConfig() error {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	if err := cm.loadBaseConfig(); err != nil {
-		return err
-	}
-
-	cm.mergeConfigs()
-	cm.notifyChange()
-	return nil
-}
-
-// ExportConfig exports the current merged config as JSON
+// ExportConfig exports the current config as JSON
 func (cm *ConfigManager) ExportConfig() ([]byte, error) {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	return json.MarshalIndent(cm.mergedConfig, "", "  ")
+	return json.MarshalIndent(cm.config, "", "  ")
 }
 
-// HasStateOverrides returns true if there are any runtime overrides
+// HasStateOverrides returns true (for compatibility)
 func (cm *ConfigManager) HasStateOverrides() bool {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
+	return true // Always using JSON config
+}
 
-	return cm.state.Server != nil ||
-		cm.state.Limits != nil ||
-		cm.state.Auth != nil ||
-		cm.state.Logging != nil ||
-		len(cm.state.Mounts) > 0
+// ----- Helper Functions -----
+
+// generateSecurePassword generates a secure random password
+func generateSecurePassword(length int) string {
+	const charset = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	result := make([]byte, length)
+	randomBytes := make([]byte, length)
+	rand.Read(randomBytes)
+	for i := 0; i < length; i++ {
+		result[i] = charset[int(randomBytes[i])%len(charset)]
+	}
+	return string(result)
+}
+
+// generateSecureToken generates a secure random hex token
+func generateSecureToken(length int) string {
+	bytes := make([]byte, length)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
 }

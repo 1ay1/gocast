@@ -44,6 +44,7 @@ type ListenerHandler struct {
 	config         *config.Config
 	logger         *log.Logger
 	activityBuffer *ActivityBuffer
+	mu             sync.RWMutex
 
 	// Buffer pool to reduce allocations
 	bufPool sync.Pool
@@ -71,6 +72,21 @@ func NewListenerHandlerWithActivity(mm *stream.MountManager, cfg *config.Config,
 			},
 		},
 	}
+}
+
+// SetConfig updates the handler's configuration (for hot-reload support)
+func (h *ListenerHandler) SetConfig(cfg *config.Config) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.config = cfg
+	h.logger.Println("Listener handler configuration updated")
+}
+
+// getConfig returns the current config with proper locking
+func (h *ListenerHandler) getConfig() *config.Config {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.config
 }
 
 // ServeHTTP handles listener GET requests
@@ -548,6 +564,7 @@ type StatusHandler struct {
 	config       *config.Config
 	startTime    time.Time
 	version      string
+	mu           sync.RWMutex
 }
 
 // NewStatusHandler creates a new status handler
@@ -558,6 +575,20 @@ func NewStatusHandler(mm *stream.MountManager, cfg *config.Config) *StatusHandle
 // NewStatusHandlerWithInfo creates a new status handler with server info
 func NewStatusHandlerWithInfo(mm *stream.MountManager, cfg *config.Config, startTime time.Time, version string) *StatusHandler {
 	return &StatusHandler{mountManager: mm, config: cfg, startTime: startTime, version: version}
+}
+
+// SetConfig updates the handler's configuration (for hot-reload support)
+func (h *StatusHandler) SetConfig(cfg *config.Config) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.config = cfg
+}
+
+// getConfig returns the current config with proper locking
+func (h *StatusHandler) getConfig() *config.Config {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.config
 }
 
 // ServeHTTP serves the status page
@@ -576,18 +607,19 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	cfg := h.getConfig()
 	mounts := h.mountManager.ListMounts()
 	var sb strings.Builder
 
 	// Server info
 	uptime := int64(time.Since(h.startTime).Seconds())
-	serverID := h.config.Server.ServerID
+	serverID := cfg.Server.ServerID
 	if serverID == "" {
 		serverID = "GoCast"
 	}
 
 	sb.WriteString(fmt.Sprintf(`{"server_id":%q,"version":%q,"started":%q,"uptime":%d,"host":%q,"mounts":[`,
-		serverID, h.version, h.startTime.Format(time.RFC3339), uptime, h.config.Server.Hostname))
+		serverID, h.version, h.startTime.Format(time.RFC3339), uptime, cfg.Server.Hostname))
 
 	for i, mountPath := range mounts {
 		if i > 0 {

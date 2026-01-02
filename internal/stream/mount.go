@@ -123,6 +123,7 @@ type Mount struct {
 	peakListeners int32
 	mu            sync.RWMutex
 	listenerMu    sync.RWMutex
+	configMu      sync.RWMutex
 	fallbackMount string
 }
 
@@ -145,6 +146,20 @@ func NewMount(path string, cfg *config.MountConfig, bufferSize, burstSize int) *
 		metadata:  &Metadata{ContentType: cfg.Type},
 		listeners: make(map[string]*Listener),
 	}
+}
+
+// SetConfig updates the mount's configuration (for hot-reload support)
+func (m *Mount) SetConfig(cfg *config.MountConfig) {
+	m.configMu.Lock()
+	defer m.configMu.Unlock()
+	m.Config = cfg
+}
+
+// GetConfig returns the mount's current configuration with proper locking
+func (m *Mount) GetConfig() *config.MountConfig {
+	m.configMu.RLock()
+	defer m.configMu.RUnlock()
+	return m.Config
 }
 
 // StartSource starts a source connection
@@ -206,7 +221,8 @@ func (m *Mount) WriteData(data []byte) (int, error) {
 // CanAddListener checks if a new listener can be added
 func (m *Mount) CanAddListener() bool {
 	count := atomic.LoadInt32(&m.listenerCount)
-	return int(count) < m.Config.MaxListeners
+	cfg := m.GetConfig()
+	return int(count) < cfg.MaxListeners
 }
 
 // AddListener adds a new listener
@@ -444,6 +460,7 @@ type MountManager struct {
 	mu        sync.RWMutex
 	config    *config.Config
 	maxMounts int
+	logger    func(format string, v ...interface{})
 }
 
 // NewMountManager creates a new mount manager
@@ -452,6 +469,7 @@ func NewMountManager(cfg *config.Config) *MountManager {
 		mounts:    make(map[string]*Mount),
 		config:    cfg,
 		maxMounts: cfg.Limits.MaxSources,
+		logger:    func(format string, v ...interface{}) {}, // no-op by default
 	}
 
 	// Pre-create mounts from configuration
@@ -460,6 +478,44 @@ func NewMountManager(cfg *config.Config) *MountManager {
 	}
 
 	return mm
+}
+
+// SetConfig updates the mount manager's configuration (for hot-reload support)
+// This updates the config reference and syncs mount configurations
+func (mm *MountManager) SetConfig(cfg *config.Config) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+
+	mm.config = cfg
+	mm.maxMounts = cfg.Limits.MaxSources
+
+	// Update existing mount configs and create new ones from config
+	for path, mountCfg := range cfg.Mounts {
+		if mount, exists := mm.mounts[path]; exists {
+			// Update existing mount's config
+			mount.SetConfig(mountCfg)
+		} else {
+			// Create new mount from config
+			mm.mounts[path] = NewMount(path, mountCfg, cfg.Limits.QueueSize, cfg.Limits.BurstSize)
+		}
+	}
+
+	// Remove mounts that are no longer in config (but only if they're not active)
+	for path, mount := range mm.mounts {
+		if _, exists := cfg.Mounts[path]; !exists {
+			// Only remove if no active source - don't interrupt live streams
+			if !mount.IsActive() && mount.ListenerCount() == 0 {
+				delete(mm.mounts, path)
+			}
+		}
+	}
+}
+
+// SetLogger sets the logger function for the mount manager
+func (mm *MountManager) SetLogger(logger func(format string, v ...interface{})) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	mm.logger = logger
 }
 
 // GetMount returns a mount point by path

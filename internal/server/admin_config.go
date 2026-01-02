@@ -22,11 +22,12 @@ type ConfigAPIResponse struct {
 
 // ServerConfigDTO represents server configuration for API
 type ServerConfigDTO struct {
-	Hostname string `json:"hostname"`
-	Location string `json:"location"`
-	ServerID string `json:"server_id"`
-	Port     int    `json:"port"`
-	SSLPort  int    `json:"ssl_port"`
+	Hostname      string `json:"hostname"`
+	ListenAddress string `json:"listen_address,omitempty"`
+	Location      string `json:"location"`
+	ServerID      string `json:"server_id"`
+	Port          int    `json:"port"`
+	AdminRoot     string `json:"admin_root,omitempty"`
 }
 
 // SSLConfigDTO represents SSL configuration for API
@@ -34,7 +35,7 @@ type SSLConfigDTO struct {
 	Enabled      bool   `json:"enabled"`
 	AutoSSL      bool   `json:"auto_ssl"`
 	AutoSSLEmail string `json:"auto_ssl_email,omitempty"`
-	Port         int    `json:"ssl_port"`
+	Port         int    `json:"port"`
 	CertPath     string `json:"cert_path,omitempty"`
 	KeyPath      string `json:"key_path,omitempty"`
 	Hostname     string `json:"hostname,omitempty"`
@@ -47,6 +48,9 @@ type LimitsConfigDTO struct {
 	MaxListenersPerMount int `json:"max_listeners_per_mount"`
 	QueueSize            int `json:"queue_size"`
 	BurstSize            int `json:"burst_size"`
+	ClientTimeout        int `json:"client_timeout,omitempty"`
+	HeaderTimeout        int `json:"header_timeout,omitempty"`
+	SourceTimeout        int `json:"source_timeout,omitempty"`
 }
 
 // AuthConfigDTO represents auth configuration for API
@@ -73,17 +77,33 @@ type MountConfigDTO struct {
 	BurstSize    int    `json:"burst_size"`
 }
 
+// LoggingConfigDTO represents logging configuration for API
+type LoggingConfigDTO struct {
+	LogLevel  string `json:"log_level"`
+	AccessLog string `json:"access_log,omitempty"`
+	ErrorLog  string `json:"error_log,omitempty"`
+	LogSize   int    `json:"log_size,omitempty"`
+}
+
+// DirectoryConfigDTO represents directory/YP configuration for API
+type DirectoryConfigDTO struct {
+	Enabled  bool     `json:"enabled"`
+	YPURLs   []string `json:"yp_urls,omitempty"`
+	Interval int      `json:"interval,omitempty"`
+}
+
 // FullConfigDTO represents the complete configuration for API
 type FullConfigDTO struct {
 	Server        ServerConfigDTO           `json:"server"`
 	SSL           SSLConfigDTO              `json:"ssl"`
 	Limits        LimitsConfigDTO           `json:"limits"`
 	Auth          AuthConfigDTO             `json:"auth"`
+	Logging       LoggingConfigDTO          `json:"logging"`
+	Directory     DirectoryConfigDTO        `json:"directory"`
 	Mounts        map[string]MountConfigDTO `json:"mounts"`
-	HasOverrides  bool                      `json:"has_overrides"`
 	LastModified  string                    `json:"last_modified,omitempty"`
-	ZeroConfig    bool                      `json:"zero_config"`
 	SetupComplete bool                      `json:"setup_complete"`
+	ConfigPath    string                    `json:"config_path,omitempty"`
 }
 
 // handleAdminConfig routes config API requests
@@ -105,6 +125,8 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		s.handleResetConfig(w, r)
 	case path == "/admin/config/export" && r.Method == http.MethodGet:
 		s.handleExportConfig(w, r)
+	case path == "/admin/config/reload" && r.Method == http.MethodPost:
+		s.handleReloadConfig(w, r)
 	case path == "/admin/config/server" && r.Method == http.MethodPost:
 		s.handleUpdateServerConfig(w, r)
 	case path == "/admin/config/ssl" && r.Method == http.MethodGet:
@@ -117,8 +139,14 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		s.handleDisableSSL(w, r)
 	case path == "/admin/config/limits" && r.Method == http.MethodPost:
 		s.handleUpdateLimitsConfig(w, r)
+	case path == "/admin/config/limits" && r.Method == http.MethodGet:
+		s.handleGetLimitsConfig(w, r)
 	case path == "/admin/config/auth" && r.Method == http.MethodPost:
 		s.handleUpdateAuthConfig(w, r)
+	case path == "/admin/config/logging" && r.Method == http.MethodPost:
+		s.handleUpdateLoggingConfig(w, r)
+	case path == "/admin/config/directory" && r.Method == http.MethodPost:
+		s.handleUpdateDirectoryConfig(w, r)
 	case strings.HasPrefix(path, "/admin/config/mounts"):
 		s.handleMountsConfig(w, r)
 	default:
@@ -129,23 +157,23 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 // handleGetConfig returns the current configuration
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.configManager.GetConfig()
-	state := s.configManager.GetState()
 
 	dto := FullConfigDTO{
 		Server: ServerConfigDTO{
-			Hostname: cfg.Server.Hostname,
-			Location: cfg.Server.Location,
-			ServerID: cfg.Server.ServerID,
-			Port:     cfg.Server.Port,
-			SSLPort:  cfg.Server.SSLPort,
+			Hostname:      cfg.Server.Hostname,
+			ListenAddress: cfg.Server.ListenAddress,
+			Location:      cfg.Server.Location,
+			ServerID:      cfg.Server.ServerID,
+			Port:          cfg.Server.Port,
+			AdminRoot:     cfg.Server.AdminRoot,
 		},
 		SSL: SSLConfigDTO{
-			Enabled:      cfg.Server.SSLEnabled,
-			AutoSSL:      cfg.Server.AutoSSL,
-			AutoSSLEmail: cfg.Server.AutoSSLEmail,
-			Port:         cfg.Server.SSLPort,
-			CertPath:     cfg.Server.SSLCert,
-			KeyPath:      cfg.Server.SSLKey,
+			Enabled:      cfg.SSL.Enabled,
+			AutoSSL:      cfg.SSL.AutoSSL,
+			AutoSSLEmail: cfg.SSL.AutoSSLEmail,
+			Port:         cfg.SSL.Port,
+			CertPath:     cfg.SSL.CertPath,
+			KeyPath:      cfg.SSL.KeyPath,
 			Hostname:     cfg.Server.Hostname,
 		},
 		Limits: LimitsConfigDTO{
@@ -154,17 +182,30 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			MaxListenersPerMount: cfg.Limits.MaxListenersPerMount,
 			QueueSize:            cfg.Limits.QueueSize,
 			BurstSize:            cfg.Limits.BurstSize,
+			ClientTimeout:        int(cfg.Limits.ClientTimeout.Seconds()),
+			HeaderTimeout:        int(cfg.Limits.HeaderTimeout.Seconds()),
+			SourceTimeout:        int(cfg.Limits.SourceTimeout.Seconds()),
 		},
 		Auth: AuthConfigDTO{
 			SourcePassword: cfg.Auth.SourcePassword,
 			AdminUser:      cfg.Admin.User,
 			// Don't expose admin password
 		},
+		Logging: LoggingConfigDTO{
+			LogLevel:  cfg.Logging.LogLevel,
+			AccessLog: cfg.Logging.AccessLog,
+			ErrorLog:  cfg.Logging.ErrorLog,
+			LogSize:   cfg.Logging.LogSize,
+		},
+		Directory: DirectoryConfigDTO{
+			Enabled:  cfg.Directory.Enabled,
+			YPURLs:   cfg.Directory.YPURLs,
+			Interval: int(cfg.Directory.Interval.Seconds()),
+		},
 		Mounts:        make(map[string]MountConfigDTO),
-		HasOverrides:  s.configManager.HasStateOverrides(),
-		LastModified:  state.LastModified.Format(time.RFC3339),
-		ZeroConfig:    s.configManager.IsZeroConfigMode(),
+		LastModified:  cfg.LastModified.Format(time.RFC3339),
 		SetupComplete: s.configManager.IsSetupComplete(),
+		ConfigPath:    s.configManager.GetConfigPath(),
 	}
 
 	for path, mount := range cfg.Mounts {
@@ -187,6 +228,19 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	s.jsonSuccess(w, dto)
 }
 
+// handleReloadConfig reloads configuration from disk
+func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
+	if err := s.configManager.Reload(); err != nil {
+		s.jsonError(w, "Failed to reload configuration: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.jsonResponse(w, ConfigAPIResponse{
+		Success: true,
+		Message: "Configuration reloaded from disk. Changes applied immediately.",
+	})
+}
+
 // handleUpdateConfig handles full configuration update
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	var dto FullConfigDTO
@@ -196,7 +250,11 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update server config
-	if err := s.configManager.UpdateServer(&dto.Server.Hostname, &dto.Server.Location, &dto.Server.ServerID, nil); err != nil {
+	var port *int
+	if dto.Server.Port > 0 {
+		port = &dto.Server.Port
+	}
+	if err := s.configManager.UpdateServer(&dto.Server.Hostname, &dto.Server.Location, &dto.Server.ServerID, nil, nil, port); err != nil {
 		s.jsonError(w, "Failed to update server config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -208,6 +266,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		&dto.Limits.MaxListenersPerMount,
 		&dto.Limits.QueueSize,
 		&dto.Limits.BurstSize,
+		nil, nil, nil,
 	); err != nil {
 		s.jsonError(w, "Failed to update limits config: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -225,7 +284,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: "Configuration updated successfully",
+		Message: "Configuration updated. Changes applied immediately.",
 	})
 }
 
@@ -238,7 +297,7 @@ func (s *Server) handleResetConfig(w http.ResponseWriter, r *http.Request) {
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: "Configuration reset to defaults",
+		Message: "Configuration reset to defaults. Changes applied immediately.",
 	})
 }
 
@@ -263,14 +322,28 @@ func (s *Server) handleUpdateServerConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.configManager.UpdateServer(&dto.Hostname, &dto.Location, &dto.ServerID, nil); err != nil {
+	// Handle optional fields
+	var listenAddr, adminRoot *string
+	if dto.ListenAddress != "" {
+		listenAddr = &dto.ListenAddress
+	}
+	if dto.AdminRoot != "" {
+		adminRoot = &dto.AdminRoot
+	}
+
+	var port *int
+	if dto.Port > 0 {
+		port = &dto.Port
+	}
+
+	if err := s.configManager.UpdateServer(&dto.Hostname, &dto.Location, &dto.ServerID, listenAddr, adminRoot, port); err != nil {
 		s.jsonError(w, "Failed to update server config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: "Server configuration updated",
+		Message: "Server configuration updated. Changes applied immediately.",
 	})
 }
 
@@ -279,12 +352,12 @@ func (s *Server) handleGetSSLConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.configManager.GetConfig()
 
 	dto := SSLConfigDTO{
-		Enabled:      cfg.Server.SSLEnabled,
-		AutoSSL:      cfg.Server.AutoSSL,
-		AutoSSLEmail: cfg.Server.AutoSSLEmail,
-		Port:         cfg.Server.SSLPort,
-		CertPath:     cfg.Server.SSLCert,
-		KeyPath:      cfg.Server.SSLKey,
+		Enabled:      cfg.SSL.Enabled,
+		AutoSSL:      cfg.SSL.AutoSSL,
+		AutoSSLEmail: cfg.SSL.AutoSSLEmail,
+		Port:         cfg.SSL.Port,
+		CertPath:     cfg.SSL.CertPath,
+		KeyPath:      cfg.SSL.KeyPath,
 		Hostname:     cfg.Server.Hostname,
 	}
 
@@ -306,7 +379,6 @@ func (s *Server) handleUpdateSSLConfig(w http.ResponseWriter, r *http.Request) {
 		&dto.AutoSSLEmail,
 		&dto.CertPath,
 		&dto.KeyPath,
-		nil,
 	); err != nil {
 		s.jsonError(w, "Failed to update SSL config: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -314,7 +386,7 @@ func (s *Server) handleUpdateSSLConfig(w http.ResponseWriter, r *http.Request) {
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: "SSL configuration updated. Restart server to apply changes.",
+		Message: "SSL configuration updated. Changes applied immediately.",
 	})
 }
 
@@ -342,7 +414,7 @@ func (s *Server) handleEnableAutoSSL(w http.ResponseWriter, r *http.Request) {
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: "AutoSSL enabled. Restart server to obtain certificate.",
+		Message: "AutoSSL enabled. Changes applied immediately.",
 	})
 }
 
@@ -355,7 +427,7 @@ func (s *Server) handleDisableSSL(w http.ResponseWriter, r *http.Request) {
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: "SSL disabled. Restart server to apply changes.",
+		Message: "SSL disabled. Changes applied immediately.",
 	})
 }
 
@@ -367,12 +439,44 @@ func (s *Server) handleUpdateLimitsConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Only update fields that have valid non-zero values
+	var maxClients, maxSources, maxListenersPerMount, queueSize, burstSize *int
+	var clientTimeout, headerTimeout, sourceTimeout *int
+
+	if dto.MaxClients > 0 {
+		maxClients = &dto.MaxClients
+	}
+	if dto.MaxSources > 0 {
+		maxSources = &dto.MaxSources
+	}
+	if dto.MaxListenersPerMount > 0 {
+		maxListenersPerMount = &dto.MaxListenersPerMount
+	}
+	if dto.QueueSize > 0 {
+		queueSize = &dto.QueueSize
+	}
+	if dto.BurstSize > 0 {
+		burstSize = &dto.BurstSize
+	}
+	if dto.ClientTimeout > 0 {
+		clientTimeout = &dto.ClientTimeout
+	}
+	if dto.HeaderTimeout > 0 {
+		headerTimeout = &dto.HeaderTimeout
+	}
+	if dto.SourceTimeout > 0 {
+		sourceTimeout = &dto.SourceTimeout
+	}
+
 	if err := s.configManager.UpdateLimits(
-		&dto.MaxClients,
-		&dto.MaxSources,
-		&dto.MaxListenersPerMount,
-		&dto.QueueSize,
-		&dto.BurstSize,
+		maxClients,
+		maxSources,
+		maxListenersPerMount,
+		queueSize,
+		burstSize,
+		clientTimeout,
+		headerTimeout,
+		sourceTimeout,
 	); err != nil {
 		s.jsonError(w, "Failed to update limits config: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -380,7 +484,82 @@ func (s *Server) handleUpdateLimitsConfig(w http.ResponseWriter, r *http.Request
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: "Limits configuration updated",
+		Message: "Limits configuration updated. Changes applied immediately.",
+	})
+}
+
+// handleGetLimitsConfig returns the current limits configuration
+func (s *Server) handleGetLimitsConfig(w http.ResponseWriter, r *http.Request) {
+	cfg := s.configManager.GetConfig()
+
+	dto := LimitsConfigDTO{
+		MaxClients:           cfg.Limits.MaxClients,
+		MaxSources:           cfg.Limits.MaxSources,
+		MaxListenersPerMount: cfg.Limits.MaxListenersPerMount,
+		QueueSize:            cfg.Limits.QueueSize,
+		BurstSize:            cfg.Limits.BurstSize,
+		ClientTimeout:        int(cfg.Limits.ClientTimeout.Seconds()),
+		HeaderTimeout:        int(cfg.Limits.HeaderTimeout.Seconds()),
+		SourceTimeout:        int(cfg.Limits.SourceTimeout.Seconds()),
+	}
+
+	s.jsonSuccess(w, dto)
+}
+
+// handleUpdateLoggingConfig updates logging configuration
+func (s *Server) handleUpdateLoggingConfig(w http.ResponseWriter, r *http.Request) {
+	var dto LoggingConfigDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		s.jsonError(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Handle optional fields
+	var accessLog, errorLog *string
+	var logSize *int
+	if dto.AccessLog != "" {
+		accessLog = &dto.AccessLog
+	}
+	if dto.ErrorLog != "" {
+		errorLog = &dto.ErrorLog
+	}
+	if dto.LogSize > 0 {
+		logSize = &dto.LogSize
+	}
+
+	if err := s.configManager.UpdateLogging(&dto.LogLevel, accessLog, errorLog, logSize); err != nil {
+		s.jsonError(w, "Failed to update logging config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.jsonResponse(w, ConfigAPIResponse{
+		Success: true,
+		Message: "Logging configuration updated. Changes applied immediately.",
+	})
+}
+
+// handleUpdateDirectoryConfig updates directory/YP configuration
+func (s *Server) handleUpdateDirectoryConfig(w http.ResponseWriter, r *http.Request) {
+	var dto DirectoryConfigDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		s.jsonError(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Handle optional interval
+	var interval *int
+	if dto.Interval > 0 {
+		interval = &dto.Interval
+	}
+
+	if err := s.configManager.UpdateDirectory(&dto.Enabled, dto.YPURLs, interval); err != nil {
+		s.jsonError(w, "Failed to update directory config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.jsonResponse(w, ConfigAPIResponse{
+		Success: true,
+		Message: "Directory configuration updated. Changes applied immediately.",
 	})
 }
 
@@ -392,19 +571,30 @@ func (s *Server) handleUpdateAuthConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Only update fields that are non-empty (leave unchanged if empty)
+	var sourcePass *string
+	if dto.SourcePassword != "" {
+		sourcePass = &dto.SourcePassword
+	}
+
+	var adminUser *string
+	if dto.AdminUser != "" {
+		adminUser = &dto.AdminUser
+	}
+
 	var adminPass *string
 	if dto.AdminPassword != "" {
 		adminPass = &dto.AdminPassword
 	}
 
-	if err := s.configManager.UpdateAuth(&dto.SourcePassword, &dto.AdminUser, adminPass); err != nil {
+	if err := s.configManager.UpdateAuth(sourcePass, adminUser, adminPass); err != nil {
 		s.jsonError(w, "Failed to update auth config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: "Auth configuration updated",
+		Message: "Auth configuration updated. Changes applied immediately.",
 	})
 }
 
@@ -431,9 +621,6 @@ func (s *Server) handleMountsConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// URL decode the mount path
-	mountPath = strings.ReplaceAll(mountPath, "%2F", "/")
-
 	switch r.Method {
 	case http.MethodGet:
 		s.handleGetMountConfig(w, r, mountPath)
@@ -450,9 +637,9 @@ func (s *Server) handleMountsConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListMountsConfig(w http.ResponseWriter, r *http.Request) {
 	mounts := s.configManager.GetAllMounts()
 
-	dtos := make([]MountConfigDTO, 0, len(mounts))
+	result := make(map[string]MountConfigDTO)
 	for path, mount := range mounts {
-		dtos = append(dtos, MountConfigDTO{
+		result[path] = MountConfigDTO{
 			Path:         path,
 			Name:         mount.Name,
 			MaxListeners: mount.MaxListeners,
@@ -465,10 +652,10 @@ func (s *Server) handleListMountsConfig(w http.ResponseWriter, r *http.Request) 
 			StreamName:   mount.StreamName,
 			Hidden:       mount.Hidden,
 			BurstSize:    mount.BurstSize,
-		})
+		}
 	}
 
-	s.jsonSuccess(w, dtos)
+	s.jsonSuccess(w, result)
 }
 
 // handleCreateMountConfig creates a new mount
@@ -483,6 +670,13 @@ func (s *Server) handleCreateMountConfig(w http.ResponseWriter, r *http.Request)
 		s.jsonError(w, "Mount path is required", http.StatusBadRequest)
 		return
 	}
+
+	// Ensure path starts with /
+	if !strings.HasPrefix(dto.Path, "/") {
+		dto.Path = "/" + dto.Path
+	}
+
+	cfg := s.configManager.GetConfig()
 
 	mount := &config.MountConfig{
 		Name:         dto.Path,
@@ -499,21 +693,18 @@ func (s *Server) handleCreateMountConfig(w http.ResponseWriter, r *http.Request)
 		BurstSize:    dto.BurstSize,
 	}
 
-	// Set defaults
+	// Apply defaults
 	if mount.MaxListeners == 0 {
-		mount.MaxListeners = s.config.Limits.MaxListenersPerMount
+		mount.MaxListeners = cfg.Limits.MaxListenersPerMount
 	}
 	if mount.Type == "" {
 		mount.Type = "audio/mpeg"
 	}
+	if mount.BurstSize == 0 {
+		mount.BurstSize = cfg.Limits.BurstSize
+	}
 	if mount.Bitrate == 0 {
 		mount.Bitrate = 128
-	}
-	if mount.BurstSize == 0 {
-		mount.BurstSize = s.config.Limits.BurstSize
-	}
-	if mount.Password == "" {
-		mount.Password = s.config.Auth.SourcePassword
 	}
 
 	if err := s.configManager.CreateMount(dto.Path, mount); err != nil {
@@ -521,12 +712,9 @@ func (s *Server) handleCreateMountConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Also create the mount in the mount manager
-	s.mountManager.GetOrCreateMount(dto.Path)
-
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: fmt.Sprintf("Mount %s created", dto.Path),
+		Message: fmt.Sprintf("Mount %s created. Changes applied immediately.", dto.Path),
 	})
 }
 
@@ -556,7 +744,7 @@ func (s *Server) handleGetMountConfig(w http.ResponseWriter, r *http.Request, mo
 	s.jsonSuccess(w, dto)
 }
 
-// handleUpdateMountConfig updates a mount configuration
+// handleUpdateMountConfig updates an existing mount
 func (s *Server) handleUpdateMountConfig(w http.ResponseWriter, r *http.Request, mountPath string) {
 	var dto MountConfigDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
@@ -586,11 +774,11 @@ func (s *Server) handleUpdateMountConfig(w http.ResponseWriter, r *http.Request,
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: fmt.Sprintf("Mount %s updated", mountPath),
+		Message: fmt.Sprintf("Mount %s updated. Changes applied immediately.", mountPath),
 	})
 }
 
-// handleDeleteMountConfig deletes a mount configuration
+// handleDeleteMountConfig deletes a mount
 func (s *Server) handleDeleteMountConfig(w http.ResponseWriter, r *http.Request, mountPath string) {
 	if err := s.configManager.DeleteMount(mountPath); err != nil {
 		s.jsonError(w, "Failed to delete mount: "+err.Error(), http.StatusInternalServerError)
@@ -599,32 +787,17 @@ func (s *Server) handleDeleteMountConfig(w http.ResponseWriter, r *http.Request,
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: fmt.Sprintf("Mount %s deleted", mountPath),
+		Message: fmt.Sprintf("Mount %s deleted. Changes applied immediately.", mountPath),
 	})
 }
 
-// handleGetLimitsConfig returns limits configuration (for quick access)
-func (s *Server) handleGetLimitsConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := s.configManager.GetConfig()
-
-	dto := LimitsConfigDTO{
-		MaxClients:           cfg.Limits.MaxClients,
-		MaxSources:           cfg.Limits.MaxSources,
-		MaxListenersPerMount: cfg.Limits.MaxListenersPerMount,
-		QueueSize:            cfg.Limits.QueueSize,
-		BurstSize:            cfg.Limits.BurstSize,
-	}
-
-	s.jsonSuccess(w, dto)
-}
-
-// JSON helper methods
-
+// jsonResponse writes a JSON response
 func (s *Server) jsonResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
 }
 
+// jsonSuccess writes a successful JSON response with data
 func (s *Server) jsonSuccess(w http.ResponseWriter, data interface{}) {
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
@@ -632,6 +805,7 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, data interface{}) {
 	})
 }
 
+// jsonError writes an error JSON response
 func (s *Server) jsonError(w http.ResponseWriter, message string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -641,24 +815,24 @@ func (s *Server) jsonError(w http.ResponseWriter, message string, status int) {
 	})
 }
 
-// parseIntParam parses an integer from query parameter
-func parseIntParam(r *http.Request, name string, defaultVal int) int {
+// parseIntParam parses an integer from query parameters
+func parseIntParam(r *http.Request, name string, defaultValue int) int {
 	val := r.URL.Query().Get(name)
 	if val == "" {
-		return defaultVal
+		return defaultValue
 	}
 	i, err := strconv.Atoi(val)
 	if err != nil {
-		return defaultVal
+		return defaultValue
 	}
 	return i
 }
 
-// parseBoolParam parses a boolean from query parameter
-func parseBoolParam(r *http.Request, name string, defaultVal bool) bool {
+// parseBoolParam parses a boolean from query parameters
+func parseBoolParam(r *http.Request, name string, defaultValue bool) bool {
 	val := r.URL.Query().Get(name)
 	if val == "" {
-		return defaultVal
+		return defaultValue
 	}
-	return val == "1" || val == "true" || val == "yes"
+	return val == "true" || val == "1" || val == "yes"
 }

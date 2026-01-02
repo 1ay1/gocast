@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gocast/gocast/internal/config"
 	"github.com/gocast/gocast/internal/server"
 )
 
@@ -25,8 +24,7 @@ var (
 
 func main() {
 	// Parse command line flags
-	configFile := flag.String("config", "", "Path to configuration file (optional)")
-	dataDir := flag.String("data", "", "Data directory for persistent config (default: auto-detect)")
+	dataDir := flag.String("data", "", "Data directory for config and state (default: ~/.gocast)")
 	showVersion := flag.Bool("version", false, "Show version information")
 	showHelp := flag.Bool("help", false, "Show help message")
 
@@ -51,42 +49,13 @@ func main() {
 	// Print banner
 	printBanner(logger)
 
-	var srv *server.Server
-	var cfg *config.Config
-
-	// Check if config file is provided
-	if *configFile != "" {
-		// Legacy mode: use config file
-		logger.Printf("Loading configuration from %s", *configFile)
-
-		configManager, err := config.NewConfigManagerWithLogger(*configFile, logger)
-		if err != nil {
-			logger.Fatalf("Failed to load configuration: %v", err)
-		}
-
-		cfg = configManager.GetConfig()
-
-		if err := cfg.Validate(); err != nil {
-			logger.Fatalf("Invalid configuration: %v", err)
-		}
-
-		if configManager.HasStateOverrides() {
-			logger.Println("Runtime configuration overrides loaded from state.json")
-		}
-
-		srv = server.NewWithConfigManager(configManager, logger)
-	} else {
-		// Zero-config mode: all settings via admin panel
-		logger.Println("Starting in zero-config mode...")
-
-		var err error
-		srv, err = server.NewWithSetupManager(*dataDir, logger)
-		if err != nil {
-			logger.Fatalf("Failed to initialize server: %v", err)
-		}
-
-		cfg = srv.GetConfigManager().GetConfig()
+	// Create server with config manager
+	srv, err := server.NewWithSetupManager(*dataDir, logger)
+	if err != nil {
+		logger.Fatalf("Failed to initialize server: %v", err)
 	}
+
+	cfg := srv.GetConfigManager().GetConfig()
 
 	// Setup log capture for admin panel
 	logWriter := srv.GetLogWriter("server")
@@ -109,16 +78,17 @@ func main() {
 	}
 
 	// Print server info
-	if cfg.Server.AutoSSL {
+	if cfg.SSL.AutoSSL {
 		logger.Printf("GoCast is running with AutoSSL on https://%s", cfg.Server.Hostname)
 		logger.Printf("HTTP redirect active on port 80")
-	} else if cfg.Server.SSLEnabled {
-		logger.Printf("GoCast is running on https://%s:%d", cfg.Server.Hostname, cfg.Server.SSLPort)
+	} else if cfg.SSL.Enabled {
+		logger.Printf("GoCast is running on https://%s:%d", cfg.Server.Hostname, cfg.SSL.Port)
 	} else {
 		logger.Printf("GoCast is running on http://%s:%d", cfg.Server.Hostname, cfg.Server.Port)
 	}
 
 	logger.Printf("Admin panel: http://%s:%d/admin/", cfg.Server.Hostname, cfg.Server.Port)
+	logger.Printf("Config file: %s", srv.GetConfigManager().GetConfigPath())
 
 	// Wait for shutdown signal
 	quit := make(chan os.Signal, 1)
@@ -130,8 +100,11 @@ func main() {
 		switch sig {
 		case syscall.SIGHUP:
 			logger.Println("Received SIGHUP, reloading configuration...")
-			// TODO: Implement hot reload for setup manager mode
-			logger.Println("Configuration reload not yet implemented in zero-config mode")
+			if err := srv.GetConfigManager().Reload(); err != nil {
+				logger.Printf("Failed to reload configuration: %v", err)
+			} else {
+				logger.Println("Configuration reloaded successfully")
+			}
 
 		case syscall.SIGINT, syscall.SIGTERM:
 			logger.Printf("Received %v, shutting down...", sig)
@@ -172,25 +145,30 @@ USAGE:
     gocast [OPTIONS]
 
 OPTIONS:
-    -data <dir>       Data directory for persistent config (default: auto-detect)
-    -config <file>    Path to configuration file (optional, legacy mode)
+    -data <dir>       Data directory for config and state (default: ~/.gocast)
     -version          Show version information
     -help             Show this help message
 
-ZERO-CONFIG MODE (Default):
-    GoCast runs without any configuration file. On first start, it will:
-    1. Generate secure admin credentials (shown once in console)
-    2. Start the admin panel at http://localhost:8000/admin/
-    3. All settings are configured via the web admin panel
+HOW IT WORKS:
+    GoCast stores all configuration in a single JSON file (~/.gocast/config.json).
 
-    Configuration is automatically persisted to the data directory.
+    On first start:
+    1. Secure admin credentials are generated (shown once in console)
+    2. A default /live mount point is created
+    3. The admin panel is available at http://localhost:8000/admin/
 
-LEGACY MODE (with -config):
-    Use a VIBE configuration file for settings.
+    All settings can be changed via the web admin panel. Changes are saved
+    automatically and most take effect immediately (no restart needed).
 
 SIGNALS:
     SIGINT, SIGTERM   Graceful shutdown
-    SIGHUP            Reload configuration
+    SIGHUP            Hot reload configuration from disk
+
+CONFIGURATION:
+    Config file: ~/.gocast/config.json
+
+    You can edit this file directly - use SIGHUP or the admin panel's
+    "Reload from Disk" button to apply changes without restarting.
 
 For more information, visit: https://github.com/gocast/gocast
 `, version)

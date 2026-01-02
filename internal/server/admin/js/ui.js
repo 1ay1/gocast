@@ -365,6 +365,22 @@ const UI = {
             </div>
         `;
   },
+
+  /**
+   * Toggle password field visibility
+   */
+  togglePassword(inputId, button) {
+    const input = this.$(inputId);
+    if (!input) return;
+
+    if (input.type === "password") {
+      input.type = "text";
+      if (button) button.textContent = "🔒";
+    } else {
+      input.type = "password";
+      if (button) button.textContent = "👁️";
+    }
+  },
 };
 
 // Export for use in other modules

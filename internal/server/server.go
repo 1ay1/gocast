@@ -131,12 +131,20 @@ func NewWithConfigManager(cm *config.ConfigManager, logger *log.Logger) *Server 
 		"port":    cfg.Server.Port,
 	})
 
-	// Register for config changes
+	// Register for config changes - propagate to all handlers
 	cm.OnChange(func(newCfg *config.Config) {
 		s.mu.Lock()
 		s.config = newCfg
 		s.mu.Unlock()
-		s.logger.Println("Configuration updated")
+
+		// Propagate config to all handlers for hot-reload
+		s.sourceHandler.SetConfig(newCfg)
+		s.metadataHandler.SetConfig(newCfg)
+		s.listenerHandler.SetConfig(newCfg)
+		s.statusHandler.SetConfig(newCfg)
+		s.mountManager.SetConfig(newCfg)
+
+		s.logger.Println("Configuration updated and propagated to all handlers")
 	})
 
 	// Clean up expired tokens periodically
@@ -157,8 +165,8 @@ func NewWithSetupManager(dataDir string, logger *log.Logger) (*Server, error) {
 		logger = log.Default()
 	}
 
-	// Create config manager in zero-config mode
-	cm, err := config.NewZeroConfigManager(dataDir, logger)
+	// Create config manager
+	cm, err := config.NewConfigManager(dataDir, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize config manager: %w", err)
 	}
@@ -171,8 +179,8 @@ func NewWithSetupManager(dataDir string, logger *log.Logger) (*Server, error) {
 	activityBuffer := NewActivityBuffer(500)
 
 	// Set AutoSSL cache directory if not set
-	if cfg.Server.AutoSSL && cfg.Server.AutoSSLCache == "" {
-		cfg.Server.AutoSSLCache = filepath.Join(cm.GetDataDir(), "certs")
+	if cfg.SSL.AutoSSL && cfg.SSL.CacheDir == "" {
+		cfg.SSL.CacheDir = filepath.Join(cm.GetDataDir(), "certs")
 	}
 
 	s := &Server{
@@ -196,12 +204,20 @@ func NewWithSetupManager(dataDir string, logger *log.Logger) (*Server, error) {
 		"port":    cfg.Server.Port,
 	})
 
-	// Register for config changes
+	// Register for config changes - propagate to all handlers
 	cm.OnChange(func(newCfg *config.Config) {
 		s.mu.Lock()
 		s.config = newCfg
 		s.mu.Unlock()
-		s.logger.Println("Configuration updated")
+
+		// Propagate config to all handlers for hot-reload
+		s.sourceHandler.SetConfig(newCfg)
+		s.metadataHandler.SetConfig(newCfg)
+		s.listenerHandler.SetConfig(newCfg)
+		s.statusHandler.SetConfig(newCfg)
+		s.mountManager.SetConfig(newCfg)
+
+		s.logger.Println("Configuration updated and propagated to all handlers")
 	})
 
 	// Clean up expired tokens periodically
@@ -249,7 +265,7 @@ func (s *Server) Start() error {
 	mux := s.createRouter()
 
 	// Check if AutoSSL is enabled
-	if s.config.Server.AutoSSL {
+	if s.config.SSL.AutoSSL {
 		return s.startWithAutoSSL(mux)
 	}
 
@@ -273,7 +289,7 @@ func (s *Server) Start() error {
 	}()
 
 	// Start HTTPS server if enabled
-	if s.config.Server.SSLEnabled {
+	if s.config.SSL.Enabled && !s.config.SSL.AutoSSL {
 		if err := s.startHTTPS(mux); err != nil {
 			return fmt.Errorf("failed to start HTTPS server: %w", err)
 		}
@@ -289,8 +305,8 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 	// Create AutoSSL manager
 	autoSSL, err := NewAutoSSLManager(
 		s.config.Server.Hostname,
-		s.config.Server.AutoSSLEmail,
-		s.config.Server.AutoSSLCache,
+		s.config.SSL.AutoSSLEmail,
+		s.config.SSL.CacheDir,
 		s.logger,
 	)
 	if err != nil {
@@ -299,7 +315,7 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 	s.autoSSL = autoSSL
 
 	// Start HTTP server on port 80 for ACME challenges + redirect to HTTPS
-	sslPort := s.config.Server.SSLPort
+	sslPort := s.config.SSL.Port
 	if sslPort == 0 {
 		sslPort = 443
 	}
@@ -330,7 +346,7 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 
 // startHTTPS starts the HTTPS server
 func (s *Server) startHTTPS(handler http.Handler) error {
-	cert, err := tls.LoadX509KeyPair(s.config.Server.SSLCert, s.config.Server.SSLKey)
+	cert, err := tls.LoadX509KeyPair(s.config.SSL.CertPath, s.config.SSL.KeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to load SSL certificates: %w", err)
 	}
@@ -340,7 +356,7 @@ func (s *Server) startHTTPS(handler http.Handler) error {
 		MinVersion:   tls.VersionTLS12,
 	}
 
-	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.Server.SSLPort)
+	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.SSL.Port)
 	s.httpsServer = &http.Server{
 		Addr:              addr,
 		Handler:           handler,

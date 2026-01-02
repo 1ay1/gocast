@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gocast/gocast/internal/config"
@@ -22,6 +23,7 @@ type Handler struct {
 	mountManager *stream.MountManager
 	config       *config.Config
 	logger       *log.Logger
+	mu           sync.RWMutex
 }
 
 // NewHandler creates a new source handler
@@ -34,6 +36,21 @@ func NewHandler(mm *stream.MountManager, cfg *config.Config, logger *log.Logger)
 		config:       cfg,
 		logger:       logger,
 	}
+}
+
+// SetConfig updates the handler's configuration (for hot-reload support)
+func (h *Handler) SetConfig(cfg *config.Config) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.config = cfg
+	h.logger.Println("Source handler configuration updated")
+}
+
+// getConfig returns the current config with proper locking
+func (h *Handler) getConfig() *config.Config {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.config
 }
 
 // HandleSource handles incoming source connections
@@ -228,8 +245,10 @@ func (h *Handler) authenticate(r *http.Request) bool {
 
 // checkCredentials verifies username and password
 func (h *Handler) checkCredentials(username, password, mountPath string) bool {
+	cfg := h.getConfig()
+
 	// Check mount-specific password first
-	if mount, exists := h.config.Mounts[mountPath]; exists {
+	if mount, exists := cfg.Mounts[mountPath]; exists {
 		if mount.Password != "" && password == mount.Password {
 			return true
 		}
@@ -238,12 +257,12 @@ func (h *Handler) checkCredentials(username, password, mountPath string) bool {
 	// Check global source password
 	// Username can be "source" or empty for Icecast compatibility
 	if username == "" || username == "source" {
-		return password == h.config.Auth.SourcePassword
+		return password == cfg.Auth.SourcePassword
 	}
 
 	// Check admin credentials
-	if username == h.config.Auth.AdminUser {
-		return password == h.config.Auth.AdminPassword
+	if username == cfg.Auth.AdminUser {
+		return password == cfg.Auth.AdminPassword
 	}
 
 	return false
@@ -536,6 +555,7 @@ type MetadataHandler struct {
 	mountManager *stream.MountManager
 	config       *config.Config
 	logger       *log.Logger
+	mu           sync.RWMutex
 }
 
 // NewMetadataHandler creates a new metadata handler
@@ -548,6 +568,21 @@ func NewMetadataHandler(mm *stream.MountManager, cfg *config.Config, logger *log
 		config:       cfg,
 		logger:       logger,
 	}
+}
+
+// SetConfig updates the handler's configuration (for hot-reload support)
+func (h *MetadataHandler) SetConfig(cfg *config.Config) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.config = cfg
+	h.logger.Println("Metadata handler configuration updated")
+}
+
+// getConfig returns the current config with proper locking
+func (h *MetadataHandler) getConfig() *config.Config {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.config
 }
 
 // HandleMetadataUpdate handles /admin/metadata requests
@@ -603,20 +638,22 @@ func (h *MetadataHandler) HandleMetadataUpdate(w http.ResponseWriter, r *http.Re
 
 // checkCredentials verifies credentials for metadata updates
 func (h *MetadataHandler) checkCredentials(username, password, mountPath string) bool {
+	cfg := h.getConfig()
+
 	// Check source credentials
 	if username == "source" || username == "" {
 		// Check mount-specific password
-		if mount, exists := h.config.Mounts[mountPath]; exists {
+		if mount, exists := cfg.Mounts[mountPath]; exists {
 			if mount.Password != "" && password == mount.Password {
 				return true
 			}
 		}
-		return password == h.config.Auth.SourcePassword
+		return password == cfg.Auth.SourcePassword
 	}
 
 	// Check admin credentials
-	if username == h.config.Auth.AdminUser {
-		return password == h.config.Auth.AdminPassword
+	if username == cfg.Auth.AdminUser {
+		return password == cfg.Auth.AdminPassword
 	}
 
 	return false

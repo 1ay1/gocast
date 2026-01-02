@@ -123,6 +123,27 @@ const API = {
   },
 
   /**
+   * Update logging configuration
+   */
+  async updateLoggingConfig(config) {
+    return this.post("/config/logging", config);
+  },
+
+  /**
+   * Update directory/YP configuration
+   */
+  async updateDirectoryConfig(config) {
+    return this.post("/config/directory", config);
+  },
+
+  /**
+   * Reload configuration from disk
+   */
+  async reloadConfig() {
+    return this.post("/config/reload", {});
+  },
+
+  /**
    * Reset configuration to defaults
    */
   async resetConfig() {

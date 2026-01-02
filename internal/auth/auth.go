@@ -47,6 +47,20 @@ func NewAuthenticator(cfg *config.Config) *Authenticator {
 	}
 }
 
+// SetConfig updates the authenticator's configuration (for hot-reload support)
+func (a *Authenticator) SetConfig(cfg *config.Config) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.config = cfg
+}
+
+// getConfig returns the current config with proper locking
+func (a *Authenticator) getConfig() *config.Config {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.config
+}
+
 // Authenticate checks credentials from an HTTP request
 func (a *Authenticator) Authenticate(r *http.Request, credType CredentialType) bool {
 	// Check for lockout
@@ -103,8 +117,10 @@ func (a *Authenticator) validateCredentials(username, password string, credType 
 
 // validateSourceCredentials validates source client credentials
 func (a *Authenticator) validateSourceCredentials(username, password, mountPath string) bool {
+	cfg := a.getConfig()
+
 	// Check mount-specific password first
-	if mount, exists := a.config.Mounts[mountPath]; exists {
+	if mount, exists := cfg.Mounts[mountPath]; exists {
 		if mount.Password != "" {
 			if secureCompare(password, mount.Password) {
 				return true
@@ -115,29 +131,31 @@ func (a *Authenticator) validateSourceCredentials(username, password, mountPath 
 	// Username can be empty or "source" for Icecast compatibility
 	if username != "" && username != "source" {
 		// Check if admin credentials are being used for source
-		if secureCompare(username, a.config.Auth.AdminUser) &&
-			secureCompare(password, a.config.Auth.AdminPassword) {
+		if secureCompare(username, cfg.Auth.AdminUser) &&
+			secureCompare(password, cfg.Auth.AdminPassword) {
 			return true
 		}
 		return false
 	}
 
 	// Check global source password
-	return secureCompare(password, a.config.Auth.SourcePassword)
+	return secureCompare(password, cfg.Auth.SourcePassword)
 }
 
 // validateRelayCredentials validates relay connection credentials
 func (a *Authenticator) validateRelayCredentials(username, password string) bool {
-	if a.config.Auth.RelayPassword == "" {
+	cfg := a.getConfig()
+	if cfg.Auth.RelayPassword == "" {
 		return false
 	}
-	return secureCompare(password, a.config.Auth.RelayPassword)
+	return secureCompare(password, cfg.Auth.RelayPassword)
 }
 
 // validateAdminCredentials validates admin interface credentials
 func (a *Authenticator) validateAdminCredentials(username, password string) bool {
-	return secureCompare(username, a.config.Auth.AdminUser) &&
-		secureCompare(password, a.config.Auth.AdminPassword)
+	cfg := a.getConfig()
+	return secureCompare(username, cfg.Auth.AdminUser) &&
+		secureCompare(password, cfg.Auth.AdminPassword)
 }
 
 // isLockedOut checks if an IP is locked out due to failed attempts

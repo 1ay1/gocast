@@ -1,7 +1,7 @@
 /**
  * GoCast Admin - Settings Page
  * Full server configuration management
- * Changes apply immediately without restart
+ * All settings are persisted and can be changed from UI
  */
 
 const SettingsPage = {
@@ -13,6 +13,8 @@ const SettingsPage = {
     server: false,
     limits: false,
     auth: false,
+    logging: false,
+    directory: false,
   },
 
   /**
@@ -23,14 +25,17 @@ const SettingsPage = {
             <div class="flex justify-between items-center mb-3">
                 <div>
                     <h2 style="margin: 0;">Server Configuration</h2>
-                    <p class="text-muted mt-1">Changes are applied immediately without restart</p>
+                    <p class="text-muted mt-1">All changes apply immediately - no restart required</p>
                 </div>
                 <div class="flex gap-2">
+                    <button class="btn btn-secondary" onclick="SettingsPage.reloadConfig()">
+                        🔄 Reload from Disk
+                    </button>
                     <button class="btn btn-secondary" onclick="SettingsPage.exportConfig()">
                         📦 Export Config
                     </button>
                     <button class="btn btn-danger" onclick="SettingsPage.resetConfig()">
-                        🔄 Reset to Defaults
+                        ⚠️ Reset to Defaults
                     </button>
                 </div>
             </div>
@@ -50,6 +55,9 @@ const SettingsPage = {
                 </button>
                 <button class="tab" data-tab="logging" onclick="SettingsPage.switchTab('logging')">
                     📋 Logging
+                </button>
+                <button class="tab" data-tab="directory" onclick="SettingsPage.switchTab('directory')">
+                    📡 Directory
                 </button>
             </div>
 
@@ -78,7 +86,13 @@ const SettingsPage = {
    */
   destroy() {
     this._config = null;
-    this._dirty = { server: false, limits: false, auth: false };
+    this._dirty = {
+      server: false,
+      limits: false,
+      auth: false,
+      logging: false,
+      directory: false,
+    };
   },
 
   /**
@@ -101,16 +115,15 @@ const SettingsPage = {
     this._activeTab = tab;
 
     // Update tab buttons
-    document.querySelectorAll(".tab").forEach((btn) => {
+    document.querySelectorAll(".tabs .tab").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.tab === tab);
     });
 
-    // Render the selected tab
     this.renderTab(tab);
   },
 
   /**
-   * Render a specific tab
+   * Render the current tab content
    */
   renderTab(tab) {
     const container = UI.$("settingsContainer");
@@ -132,8 +145,9 @@ const SettingsPage = {
       case "logging":
         container.innerHTML = this.renderLoggingTab();
         break;
-      default:
-        container.innerHTML = "<p>Unknown tab</p>";
+      case "directory":
+        container.innerHTML = this.renderDirectoryTab();
+        break;
     }
   },
 
@@ -183,36 +197,43 @@ const SettingsPage = {
                         </div>
 
                         <div class="form-group">
-                            <label class="form-label">Port</label>
-                            <input type="number"
-                                   id="cfgPort"
+                            <label class="form-label">Listen Address</label>
+                            <input type="text"
+                                   id="cfgListenAddress"
                                    class="form-input"
-                                   value="${server.port || 8000}"
-                                   disabled>
-                            <span class="form-hint">Requires restart to change</span>
+                                   value="${UI.escapeHtml(server.listen_address || "0.0.0.0")}"
+                                   onchange="SettingsPage.markDirty('server')">
+                            <span class="form-hint">IP address to bind to (0.0.0.0 = all interfaces)</span>
                         </div>
                     </div>
 
                     <div class="form-row">
                         <div class="form-group">
-                            <label class="form-label">SSL Port</label>
+                            <label class="form-label">Port</label>
                             <input type="number"
-                                   id="cfgSSLPort"
+                                   id="cfgPort"
                                    class="form-input"
-                                   value="${server.ssl_port || 8443}"
-                                   disabled>
-                            <span class="form-hint">Requires restart to change</span>
+                                   value="${server.port || 8000}"
+                                   min="1"
+                                   max="65535"
+                                   onchange="SettingsPage.markDirty('server')">
+                            <span class="form-hint">HTTP port for the server</span>
                         </div>
 
                         <div class="form-group">
-                            <label class="form-label">Admin Root</label>
+                            <label class="form-label">Admin Root Path</label>
                             <input type="text"
                                    id="cfgAdminRoot"
                                    class="form-input"
-                                   value="/admin"
-                                   disabled>
-                            <span class="form-hint">Admin panel path</span>
+                                   value="${UI.escapeHtml(server.admin_root || "/admin")}"
+                                   onchange="SettingsPage.markDirty('server')">
+                            <span class="form-hint">URL path for admin panel</span>
                         </div>
+                    </div>
+
+                    <div class="alert alert-info mt-2">
+                        <strong>💡 Tip:</strong> Settings are automatically persisted to <code>~/.gocast/config.json</code>.
+                        You can also edit this file directly and click "Reload from Disk".
                     </div>
                 </div>
                 <div class="card-footer">
@@ -234,7 +255,6 @@ const SettingsPage = {
     const isEnabled = ssl.enabled || false;
     const hostname = ssl.hostname || server.hostname || "localhost";
     const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
-
     return `
             <div class="card">
                 <div class="card-header">
@@ -311,7 +331,9 @@ const SettingsPage = {
                                         <input type="number"
                                                id="sslPort"
                                                class="form-input"
-                                               value="${ssl.ssl_port || 443}">
+                                               value="${ssl.port || 443}"
+                                               min="1"
+                                               max="65535">
                                     </div>
                                 </div>
 
@@ -364,6 +386,7 @@ const SettingsPage = {
                     <h3 class="card-title">🚦 Resource Limits</h3>
                 </div>
                 <div class="card-body">
+                    <h4 style="margin-top: 0;">Connection Limits</h4>
                     <div class="form-row">
                         <div class="form-group">
                             <label class="form-label">Max Clients</label>
@@ -401,6 +424,15 @@ const SettingsPage = {
                         </div>
 
                         <div class="form-group">
+                            <!-- Empty for alignment -->
+                        </div>
+                    </div>
+
+                    <hr style="border: none; border-top: 1px solid var(--border-color); margin: 24px 0;">
+
+                    <h4>Buffer Settings</h4>
+                    <div class="form-row">
+                        <div class="form-group">
                             <label class="form-label">Queue Size (bytes)</label>
                             <input type="number"
                                    id="cfgQueueSize"
@@ -411,9 +443,7 @@ const SettingsPage = {
                                    onchange="SettingsPage.markDirty('limits')">
                             <span class="form-hint">Buffer size per listener (131072 = 128KB)</span>
                         </div>
-                    </div>
 
-                    <div class="form-row">
                         <div class="form-group">
                             <label class="form-label">Burst Size (bytes)</label>
                             <input type="number"
@@ -424,10 +454,6 @@ const SettingsPage = {
                                    step="1024"
                                    onchange="SettingsPage.markDirty('limits')">
                             <span class="form-hint">Initial burst data sent to new listeners</span>
-                        </div>
-
-                        <div class="form-group">
-                            <!-- Empty for alignment -->
                         </div>
                     </div>
 
@@ -443,6 +469,50 @@ const SettingsPage = {
                             <button class="btn btn-sm btn-secondary" onclick="SettingsPage.applyPreset('high')">
                                 📻 High Quality
                             </button>
+                        </div>
+                    </div>
+
+                    <hr style="border: none; border-top: 1px solid var(--border-color); margin: 24px 0;">
+
+                    <h4>Timeout Settings</h4>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Client Timeout (seconds)</label>
+                            <input type="number"
+                                   id="cfgClientTimeout"
+                                   class="form-input"
+                                   value="${limits.client_timeout || 30}"
+                                   min="1"
+                                   onchange="SettingsPage.markDirty('limits')">
+                            <span class="form-hint">Timeout for inactive client connections</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label">Header Timeout (seconds)</label>
+                            <input type="number"
+                                   id="cfgHeaderTimeout"
+                                   class="form-input"
+                                   value="${limits.header_timeout || 5}"
+                                   min="1"
+                                   onchange="SettingsPage.markDirty('limits')">
+                            <span class="form-hint">Time allowed to receive request headers</span>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Source Timeout (seconds)</label>
+                            <input type="number"
+                                   id="cfgSourceTimeout"
+                                   class="form-input"
+                                   value="${limits.source_timeout || 5}"
+                                   min="1"
+                                   onchange="SettingsPage.markDirty('limits')">
+                            <span class="form-hint">Timeout for source client handshake</span>
+                        </div>
+
+                        <div class="form-group">
+                            <!-- Empty for alignment -->
                         </div>
                     </div>
                 </div>
@@ -469,12 +539,16 @@ const SettingsPage = {
                 <div class="card-body">
                     <div class="form-group">
                         <label class="form-label">Source Password</label>
-                        <input type="password"
-                               id="cfgSourcePassword"
-                               class="form-input"
-                               placeholder="Enter new password or leave empty to keep current"
-                               onchange="SettingsPage.markDirty('auth')">
-                        <span class="form-hint">Default password for source clients (broadcasters)</span>
+                        <div class="input-group">
+                            <input type="password"
+                                   id="cfgSourcePassword"
+                                   class="form-input"
+                                   value="${UI.escapeHtml(auth.source_password || "")}"
+                                   placeholder="Source password for broadcasters"
+                                   onchange="SettingsPage.markDirty('auth')">
+                            <button type="button" class="btn btn-secondary" onclick="UI.togglePassword('cfgSourcePassword', this)" title="Show/Hide">👁️</button>
+                        </div>
+                        <span class="form-hint">Default password for source clients (broadcasters). This is the password your streaming software uses.</span>
                     </div>
 
                     <hr style="border: none; border-top: 1px solid var(--border-color); margin: 24px 0;">
@@ -509,8 +583,8 @@ const SettingsPage = {
                                placeholder="Confirm new password">
                     </div>
 
-                    <div style="padding: 12px; background: rgba(245, 158, 11, 0.1); border-radius: var(--border-radius-md); border-left: 3px solid var(--warning);">
-                        <p style="margin: 0; color: var(--warning); font-size: 0.85rem;">
+                    <div class="alert alert-warning">
+                        <p style="margin: 0;">
                             ⚠️ <strong>Warning:</strong> Changing admin credentials will require you to re-login.
                         </p>
                     </div>
@@ -528,6 +602,8 @@ const SettingsPage = {
    * Render logging settings tab
    */
   renderLoggingTab() {
+    const logging = this._config.logging || {};
+
     return `
             <div class="card">
                 <div class="card-header">
@@ -536,14 +612,30 @@ const SettingsPage = {
                 <div class="card-body">
                     <div class="form-group">
                         <label class="form-label">Log Level</label>
-                        <select id="cfgLogLevel" class="form-select">
-                            <option value="debug">Debug (Verbose)</option>
-                            <option value="info" selected>Info (Default)</option>
-                            <option value="warn">Warning</option>
-                            <option value="error">Error Only</option>
+                        <select id="cfgLogLevel" class="form-select" onchange="SettingsPage.markDirty('logging')">
+                            <option value="debug" ${logging.log_level === "debug" ? "selected" : ""}>Debug (Verbose)</option>
+                            <option value="info" ${logging.log_level === "info" || !logging.log_level ? "selected" : ""}>Info (Default)</option>
+                            <option value="warn" ${logging.log_level === "warn" ? "selected" : ""}>Warning</option>
+                            <option value="error" ${logging.log_level === "error" ? "selected" : ""}>Error Only</option>
                         </select>
-                        <span class="form-hint">Controls verbosity of server logs</span>
+                        <span class="form-hint">Controls verbosity of server logs (applied immediately)</span>
                     </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Log Buffer Size</label>
+                        <input type="number"
+                               id="cfgLogSize"
+                               class="form-input"
+                               value="${logging.log_size || 10000}"
+                               min="100"
+                               max="100000"
+                               onchange="SettingsPage.markDirty('logging')">
+                        <span class="form-hint">Number of log entries to keep in memory for the admin panel</span>
+                    </div>
+
+                    <hr style="border: none; border-top: 1px solid var(--border-color); margin: 24px 0;">
+
+                    <h4>Log File Paths</h4>
 
                     <div class="form-row">
                         <div class="form-group">
@@ -551,9 +643,9 @@ const SettingsPage = {
                             <input type="text"
                                    id="cfgAccessLog"
                                    class="form-input"
-                                   value="/var/log/gocast/access.log"
-                                   disabled>
-                            <span class="form-hint">Requires restart to change</span>
+                                   value="${UI.escapeHtml(logging.access_log || "/var/log/gocast/access.log")}"
+                                   onchange="SettingsPage.markDirty('logging')">
+                            <span class="form-hint">Path for access log file</span>
                         </div>
 
                         <div class="form-group">
@@ -561,9 +653,9 @@ const SettingsPage = {
                             <input type="text"
                                    id="cfgErrorLog"
                                    class="form-input"
-                                   value="/var/log/gocast/error.log"
-                                   disabled>
-                            <span class="form-hint">Requires restart to change</span>
+                                   value="${UI.escapeHtml(logging.error_log || "/var/log/gocast/error.log")}"
+                                   onchange="SettingsPage.markDirty('logging')">
+                            <span class="form-hint">Path for error log file</span>
                         </div>
                     </div>
                 </div>
@@ -577,28 +669,90 @@ const SettingsPage = {
   },
 
   /**
-   * Mark a section as dirty (has unsaved changes)
+   * Render directory/YP settings tab
+   */
+  renderDirectoryTab() {
+    const directory = this._config.directory || {};
+    const ypUrls = (directory.yp_urls || []).join("\n");
+
+    return `
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">📡 Directory / Yellow Pages Settings</h3>
+                </div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label class="form-label">
+                            <input type="checkbox"
+                                   id="cfgDirectoryEnabled"
+                                   ${directory.enabled ? "checked" : ""}
+                                   onchange="SettingsPage.markDirty('directory')">
+                            Enable Directory Listing
+                        </label>
+                        <span class="form-hint">Publish your streams to directory servers (Yellow Pages)</span>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Directory URLs</label>
+                        <textarea id="cfgYPURLs"
+                                  class="form-input"
+                                  rows="4"
+                                  placeholder="https://dir.xiph.org/cgi-bin/yp-cgi&#10;http://dir.example.com/yp"
+                                  onchange="SettingsPage.markDirty('directory')">${UI.escapeHtml(ypUrls)}</textarea>
+                        <span class="form-hint">One URL per line. Common: https://dir.xiph.org/cgi-bin/yp-cgi</span>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Update Interval (seconds)</label>
+                        <input type="number"
+                               id="cfgYPInterval"
+                               class="form-input"
+                               value="${directory.interval || 600}"
+                               min="60"
+                               max="3600"
+                               onchange="SettingsPage.markDirty('directory')">
+                        <span class="form-hint">How often to update directory listings (min: 60s)</span>
+                    </div>
+
+                    <div class="alert alert-info">
+                        <strong>ℹ️ About Directory Listings:</strong><br>
+                        When enabled, GoCast will periodically announce your public streams to directory servers.
+                        Listeners can then find your streams through directory search.
+                        Make sure your mount points have proper metadata (name, description, genre) for best discoverability.
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <button class="btn btn-primary" onclick="SettingsPage.saveDirectorySettings()">
+                        💾 Save Directory Settings
+                    </button>
+                </div>
+            </div>
+        `;
+  },
+
+  /**
+   * Mark a section as dirty (changed)
    */
   markDirty(section) {
     this._dirty[section] = true;
   },
 
   /**
-   * Apply a preset configuration
+   * Apply buffer preset
    */
   applyPreset(preset) {
     const presets = {
       low: {
-        queueSize: 32768, // 32KB
+        queueSize: 65536, // 64KB
         burstSize: 2048, // 2KB
       },
       balanced: {
         queueSize: 131072, // 128KB
-        burstSize: 65536, // 64KB
+        burstSize: 32768, // 32KB
       },
       high: {
         queueSize: 524288, // 512KB
-        burstSize: 131072, // 128KB
+        burstSize: 65536, // 64KB
       },
     };
 
@@ -609,31 +763,32 @@ const SettingsPage = {
     UI.$("cfgBurstSize").value = config.burstSize;
     this.markDirty("limits");
 
-    UI.success(`Applied ${preset} latency preset`);
+    UI.success(`Applied "${preset}" preset - don't forget to save!`);
   },
 
   /**
    * Save server settings
    */
   async saveServerSettings() {
-    const hostname = UI.$("cfgHostname").value.trim();
-    const serverID = UI.$("cfgServerID").value.trim();
-    const location = UI.$("cfgLocation").value.trim();
+    const hostname = UI.$("cfgHostname")?.value?.trim();
+    const serverID = UI.$("cfgServerID")?.value?.trim();
+    const location = UI.$("cfgLocation")?.value?.trim();
+    const listenAddress = UI.$("cfgListenAddress")?.value?.trim();
+    const port = parseInt(UI.$("cfgPort")?.value) || 8000;
+    const adminRoot = UI.$("cfgAdminRoot")?.value?.trim();
 
     try {
-      await API.updateServerConfig({
-        hostname: hostname,
-        location: location,
+      await API.post("/config/server", {
+        hostname,
+        location,
         server_id: serverID,
+        listen_address: listenAddress,
+        port,
+        admin_root: adminRoot,
       });
-
       this._dirty.server = false;
-      UI.success("Server settings saved successfully");
-
-      // Update config cache
-      this._config.server.hostname = hostname;
-      this._config.server.server_id = serverID;
-      this._config.server.location = location;
+      UI.success("Server settings saved");
+      await this.loadConfig();
     } catch (err) {
       UI.error("Failed to save server settings: " + err.message);
     }
@@ -643,36 +798,39 @@ const SettingsPage = {
    * Save limits settings
    */
   async saveLimitsSettings() {
-    const maxClients = parseInt(UI.$("cfgMaxClients").value) || 100;
-    const maxSources = parseInt(UI.$("cfgMaxSources").value) || 10;
+    const maxClients = parseInt(UI.$("cfgMaxClients")?.value) || 100;
+    const maxSources = parseInt(UI.$("cfgMaxSources")?.value) || 10;
     const maxListenersPerMount =
-      parseInt(UI.$("cfgMaxListenersPerMount").value) || 100;
-    const queueSize = parseInt(UI.$("cfgQueueSize").value) || 131072;
-    const burstSize = parseInt(UI.$("cfgBurstSize").value) || 65536;
+      parseInt(UI.$("cfgMaxListenersPerMount")?.value) || 100;
+    const queueSize = parseInt(UI.$("cfgQueueSize")?.value) || 131072;
+    const burstSize = parseInt(UI.$("cfgBurstSize")?.value) || 65536;
+    const clientTimeout = parseInt(UI.$("cfgClientTimeout")?.value) || 30;
+    const headerTimeout = parseInt(UI.$("cfgHeaderTimeout")?.value) || 5;
+    const sourceTimeout = parseInt(UI.$("cfgSourceTimeout")?.value) || 5;
 
     try {
-      await API.updateLimitsConfig({
+      await API.post("/config/limits", {
         max_clients: maxClients,
         max_sources: maxSources,
         max_listeners_per_mount: maxListenersPerMount,
         queue_size: queueSize,
         burst_size: burstSize,
+        client_timeout: clientTimeout,
+        header_timeout: headerTimeout,
+        source_timeout: sourceTimeout,
       });
-
       this._dirty.limits = false;
-      UI.success("Limits settings saved successfully");
-
-      // Update config cache
       this._config.limits = {
         max_clients: maxClients,
         max_sources: maxSources,
         max_listeners_per_mount: maxListenersPerMount,
         queue_size: queueSize,
         burst_size: burstSize,
+        client_timeout: clientTimeout,
+        header_timeout: headerTimeout,
+        source_timeout: sourceTimeout,
       };
-
-      // Update state
-      State.set("config.limits", this._config.limits);
+      UI.success("Limits settings saved");
     } catch (err) {
       UI.error("Failed to save limits settings: " + err.message);
     }
@@ -682,50 +840,48 @@ const SettingsPage = {
    * Save auth settings
    */
   async saveAuthSettings() {
-    const sourcePassword = UI.$("cfgSourcePassword").value;
-    const adminUser = UI.$("cfgAdminUser").value.trim();
-    const adminPassword = UI.$("cfgAdminPassword").value;
-    const adminPasswordConfirm = UI.$("cfgAdminPasswordConfirm").value;
+    const sourcePassword = UI.$("cfgSourcePassword")?.value;
+    const adminUser = UI.$("cfgAdminUser")?.value?.trim();
+    const adminPassword = UI.$("cfgAdminPassword")?.value;
+    const adminPasswordConfirm = UI.$("cfgAdminPasswordConfirm")?.value;
 
-    // Validate admin password confirmation
+    // Validate password confirmation
     if (adminPassword && adminPassword !== adminPasswordConfirm) {
       UI.error("Admin passwords do not match");
       return;
     }
 
-    // Validate admin username
-    if (!adminUser) {
-      UI.error("Admin username is required");
-      return;
+    // Build config object
+    const authConfig = {
+      admin_user: adminUser,
+    };
+
+    if (sourcePassword) {
+      authConfig.source_password = sourcePassword;
+    }
+
+    if (adminPassword) {
+      authConfig.admin_password = adminPassword;
     }
 
     try {
-      const authConfig = {
-        admin_user: adminUser,
-      };
-
-      // Only include passwords if provided
-      if (sourcePassword) {
-        authConfig.source_password = sourcePassword;
-      }
-      if (adminPassword) {
-        authConfig.admin_password = adminPassword;
-      }
-
-      await API.updateAuthConfig(authConfig);
-
+      await API.post("/config/auth", authConfig);
       this._dirty.auth = false;
-      UI.success("Authentication settings saved successfully");
 
-      // Clear password fields
-      UI.$("cfgSourcePassword").value = "";
+      if (adminPassword) {
+        UI.success(
+          "Auth settings saved. You may need to re-login with the new credentials.",
+        );
+      } else {
+        UI.success("Auth settings saved");
+      }
+
+      // Clear admin password fields (keep source password visible)
       UI.$("cfgAdminPassword").value = "";
       UI.$("cfgAdminPasswordConfirm").value = "";
 
-      // If admin credentials changed, warn user
-      if (adminPassword) {
-        UI.warning("Admin password changed. You may need to re-login.");
-      }
+      // Reload config to get fresh values
+      await this.loadConfig();
     } catch (err) {
       UI.error("Failed to save auth settings: " + err.message);
     }
@@ -735,13 +891,50 @@ const SettingsPage = {
    * Save logging settings
    */
   async saveLoggingSettings() {
-    const logLevel = UI.$("cfgLogLevel")?.value;
+    const logLevel = UI.$("cfgLogLevel")?.value || "info";
+    const accessLog = UI.$("cfgAccessLog")?.value?.trim();
+    const errorLog = UI.$("cfgErrorLog")?.value?.trim();
+    const logSize = parseInt(UI.$("cfgLogSize")?.value) || 10000;
 
     try {
-      // Logging config not yet implemented in backend
+      await API.post("/config/logging", {
+        log_level: logLevel,
+        access_log: accessLog,
+        error_log: errorLog,
+        log_size: logSize,
+      });
+      this._dirty.logging = false;
       UI.success("Logging settings saved");
+      await this.loadConfig();
     } catch (err) {
       UI.error("Failed to save logging settings: " + err.message);
+    }
+  },
+
+  /**
+   * Save directory settings
+   */
+  async saveDirectorySettings() {
+    const enabled = UI.$("cfgDirectoryEnabled")?.checked || false;
+    const ypUrlsText = UI.$("cfgYPURLs")?.value || "";
+    const interval = parseInt(UI.$("cfgYPInterval")?.value) || 600;
+
+    // Parse URLs (one per line, filter empty)
+    const ypUrls = ypUrlsText
+      .split("\n")
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0);
+
+    try {
+      await API.post("/config/directory", {
+        enabled,
+        yp_urls: ypUrls,
+        interval,
+      });
+      this._dirty.directory = false;
+      UI.success("Directory settings saved");
+    } catch (err) {
+      UI.error("Failed to save directory settings: " + err.message);
     }
   },
 
@@ -820,7 +1013,7 @@ const SettingsPage = {
       await API.post("/config/ssl", {
         enabled: true,
         auto_ssl: false,
-        ssl_port: port,
+        port: port,
         cert_path: certPath,
         key_path: keyPath,
       });
@@ -828,6 +1021,19 @@ const SettingsPage = {
       await this.loadConfig();
     } catch (err) {
       UI.error("Failed to save SSL settings: " + err.message);
+    }
+  },
+
+  /**
+   * Reload configuration from disk
+   */
+  async reloadConfig() {
+    try {
+      await API.post("/config/reload", {});
+      UI.success("Configuration reloaded from disk");
+      await this.loadConfig();
+    } catch (err) {
+      UI.error("Failed to reload configuration: " + err.message);
     }
   },
 
@@ -861,7 +1067,7 @@ const SettingsPage = {
    */
   async resetConfig() {
     const confirmed = await UI.confirm(
-      "Are you sure you want to reset ALL configuration to defaults? This cannot be undone.",
+      "Are you sure you want to reset ALL configuration to defaults?\n\nThis will:\n• Clear all custom settings\n• Reset passwords to defaults\n• Remove all mount configurations\n\nThis cannot be undone!",
       {
         title: "Reset Configuration",
         confirmText: "Reset All",
@@ -880,6 +1086,3 @@ const SettingsPage = {
     }
   },
 };
-
-// Export for use in app
-window.SettingsPage = SettingsPage;
