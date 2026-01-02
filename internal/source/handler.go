@@ -271,6 +271,27 @@ func (h *Handler) parseMetadata(r *http.Request, mount *stream.Mount) {
 	if v := r.Header.Get("ice-name"); v != "" {
 		meta.Name = v
 		meta.StreamTitle = v // Also use as initial stream title
+		// Try to parse "Song - Artist" format from ice-name
+		if parts := strings.SplitN(v, " - ", 2); len(parts) == 2 {
+			meta.Title = strings.TrimSpace(parts[0])
+			meta.Artist = strings.TrimSpace(parts[1])
+			meta.StreamTitle = v
+		}
+	}
+	// Explicit artist header (ice-artist is non-standard but useful)
+	if v := r.Header.Get("ice-artist"); v != "" {
+		meta.Artist = v
+	}
+	// Explicit title header
+	if v := r.Header.Get("ice-title"); v != "" {
+		meta.Title = v
+		if meta.StreamTitle == "" || meta.StreamTitle == meta.Name {
+			if meta.Artist != "" {
+				meta.StreamTitle = meta.Title + " - " + meta.Artist
+			} else {
+				meta.StreamTitle = meta.Title
+			}
+		}
 	}
 	if v := r.Header.Get("ice-description"); v != "" {
 		meta.Description = v

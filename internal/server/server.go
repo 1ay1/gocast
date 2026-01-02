@@ -3,8 +3,10 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net"
@@ -17,6 +19,9 @@ import (
 	"github.com/gocast/gocast/internal/source"
 	"github.com/gocast/gocast/internal/stream"
 )
+
+// Version is the GoCast server version
+const Version = "1.0.0"
 
 //go:embed admin_panel.html
 var adminPanelHTML string
@@ -34,6 +39,16 @@ type Server struct {
 	logger          *log.Logger
 	startTime       time.Time
 	mu              sync.RWMutex
+	// Session tokens for authenticated SSE connections
+	sessionTokens map[string]time.Time
+	tokenMu       sync.RWMutex
+}
+
+// generateToken creates a secure random token
+func generateToken() string {
+	bytes := make([]byte, 32)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
 }
 
 // New creates a new GoCast server
@@ -53,9 +68,46 @@ func New(cfg *config.Config, logger *log.Logger) *Server {
 		statusHandler:   NewStatusHandler(mm, cfg),
 		logger:          logger,
 		startTime:       time.Now(),
+		sessionTokens:   make(map[string]time.Time),
 	}
 
+	// Clean up expired tokens periodically
+	go s.cleanupTokens()
+
 	return s
+}
+
+// cleanupTokens removes expired session tokens
+func (s *Server) cleanupTokens() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.tokenMu.Lock()
+		now := time.Now()
+		for token, expires := range s.sessionTokens {
+			if now.After(expires) {
+				delete(s.sessionTokens, token)
+			}
+		}
+		s.tokenMu.Unlock()
+	}
+}
+
+// createSessionToken creates a new session token valid for 24 hours
+func (s *Server) createSessionToken() string {
+	token := generateToken()
+	s.tokenMu.Lock()
+	s.sessionTokens[token] = time.Now().Add(24 * time.Hour)
+	s.tokenMu.Unlock()
+	return token
+}
+
+// validateSessionToken checks if a token is valid
+func (s *Server) validateSessionToken(token string) bool {
+	s.tokenMu.RLock()
+	expires, exists := s.sessionTokens[token]
+	s.tokenMu.RUnlock()
+	return exists && time.Now().Before(expires)
 }
 
 // Start starts the HTTP server(s)
@@ -194,6 +246,18 @@ func (s *Server) createRouter() http.Handler {
 			return
 		}
 
+		// Token-authenticated SSE events endpoint
+		if path == "/events" {
+			s.handleTokenEvents(w, r)
+			return
+		}
+
+		// Token generation endpoint (requires basic auth)
+		if path == "/admin/token" {
+			s.handleAdminToken(w, r)
+			return
+		}
+
 		// Favicon
 		if path == "/favicon.ico" {
 			http.NotFound(w, r)
@@ -264,6 +328,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	case path == "/admin/listmounts":
 		s.handleAdminListMounts(w, r)
 
+	case path == "/admin/events":
+		s.handleAdminEvents(w, r)
+
 	case path == "/admin/", path == "/admin":
 		s.handleAdminIndex(w, r)
 
@@ -284,7 +351,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "<admin>%s</admin>", s.config.Server.AdminRoot)
 	fmt.Fprintf(w, "<host>%s</host>", s.config.Server.Hostname)
 	fmt.Fprintf(w, "<location>%s</location>", s.config.Server.Location)
-	fmt.Fprint(w, "<server_id>GoCast/1.0.0</server_id>")
+	fmt.Fprintf(w, "<server_id>GoCast/%s</server_id>", Version)
 	fmt.Fprintf(w, "<server_start>%s</server_start>", s.startTime.Format(time.RFC3339))
 
 	for _, stat := range s.mountManager.Stats() {
@@ -397,6 +464,109 @@ func (s *Server) handleAdminKillSource(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminListMounts lists all mount points
+// handleAdminEvents provides Server-Sent Events for real-time updates
+func (s *Server) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Send initial data
+	s.sendSSEStats(w, flusher)
+
+	// Create ticker for updates (every 500ms for smooth updates)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Keep connection open and send updates
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			s.sendSSEStats(w, flusher)
+		}
+	}
+}
+
+// handleTokenEvents provides token-authenticated SSE for real-time status
+func (s *Server) handleTokenEvents(w http.ResponseWriter, r *http.Request) {
+	// Check token from query parameter
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Error(w, "Missing token", http.StatusUnauthorized)
+		return
+	}
+
+	if !s.validateSessionToken(token) {
+		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	// Token is valid, serve SSE
+	s.handleAdminEvents(w, r)
+}
+
+// handleAdminToken generates a session token for authenticated users
+func (s *Server) handleAdminToken(w http.ResponseWriter, r *http.Request) {
+	// Check if admin is enabled
+	if !s.config.Admin.Enabled {
+		http.Error(w, "Admin interface disabled", http.StatusForbidden)
+		return
+	}
+
+	// Authenticate admin
+	username, password, ok := r.BasicAuth()
+	if !ok || username != s.config.Admin.User || password != s.config.Admin.Password {
+		w.Header().Set("WWW-Authenticate", `Basic realm="GoCast Admin"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Generate and return token
+	token := s.createSessionToken()
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"token":"%s","expires_in":86400}`, token)
+}
+
+func (s *Server) sendSSEStats(w http.ResponseWriter, flusher http.Flusher) {
+	stats := s.mountManager.Stats()
+
+	// Build JSON manually for efficiency
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`{"server_id":"GoCast/%s","uptime":`, Version))
+	sb.WriteString(fmt.Sprintf("%d", int(time.Since(s.startTime).Seconds())))
+	sb.WriteString(`,"source":[`)
+
+	for i, stat := range stats {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		title := stat.Metadata.StreamTitle
+		if title == "" {
+			title = stat.Metadata.Name
+		}
+		sb.WriteString(fmt.Sprintf(
+			`{"mount":"%s","listeners":%d,"peak":%d,"active":%v,"title":"%s","artist":"%s","album":"%s","name":"%s","genre":"%s","description":"%s","bitrate":%d,"content_type":"%s"}`,
+			stat.Path, stat.Listeners, stat.PeakListeners, stat.Active,
+			escapeJSON(title), escapeJSON(stat.Metadata.Artist), escapeJSON(stat.Metadata.Album),
+			escapeJSON(stat.Metadata.Name), escapeJSON(stat.Metadata.Genre),
+			escapeJSON(stat.Metadata.Description), stat.Metadata.Bitrate, stat.ContentType,
+		))
+	}
+	sb.WriteString("]}")
+
+	fmt.Fprintf(w, "data: %s\n\n", sb.String())
+	flusher.Flush()
+}
+
 func (s *Server) handleAdminListMounts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/xml")
 

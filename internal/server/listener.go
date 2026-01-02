@@ -156,7 +156,7 @@ func (h *ListenerHandler) setResponseHeaders(w http.ResponseWriter, mount *strea
 	}
 
 	// Server
-	w.Header().Set("Server", "GoCast/1.0")
+	w.Header().Set("Server", "GoCast/"+Version)
 
 	// CORS for web players
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -429,7 +429,7 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	stats := h.mountManager.Stats()
 
-	fmt.Fprintf(w, `{"icestats":{"server_id":"GoCast/1.0.0","source":[`)
+	fmt.Fprintf(w, `{"icestats":{"server_id":"GoCast/%s","source":[`, Version)
 	for i, stat := range stats {
 		if i > 0 {
 			fmt.Fprint(w, ",")
@@ -438,14 +438,18 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter, r *http.Request) {
 		if title == "" {
 			title = stat.Metadata.Name
 		}
+		artist := stat.Metadata.Artist
+		album := stat.Metadata.Album
+		name := stat.Metadata.Name
 		genre := stat.Metadata.Genre
 		description := stat.Metadata.Description
 		bitrate := stat.Metadata.Bitrate
 		contentType := stat.ContentType
 
-		fmt.Fprintf(w, `{"mount":"%s","listeners":%d,"peak":%d,"active":%v,"title":"%s","genre":"%s","description":"%s","bitrate":%d,"content_type":"%s"}`,
+		fmt.Fprintf(w, `{"mount":"%s","listeners":%d,"peak":%d,"active":%v,"title":"%s","artist":"%s","album":"%s","name":"%s","genre":"%s","description":"%s","bitrate":%d,"content_type":"%s"}`,
 			stat.Path, stat.Listeners, stat.PeakListeners, stat.Active,
-			escapeJSON(title), escapeJSON(genre), escapeJSON(description), bitrate, contentType)
+			escapeJSON(title), escapeJSON(artist), escapeJSON(album), escapeJSON(name),
+			escapeJSON(genre), escapeJSON(description), bitrate, contentType)
 	}
 	fmt.Fprint(w, "]}}")
 }
