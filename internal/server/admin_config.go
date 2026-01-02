@@ -29,6 +29,17 @@ type ServerConfigDTO struct {
 	SSLPort  int    `json:"ssl_port"`
 }
 
+// SSLConfigDTO represents SSL configuration for API
+type SSLConfigDTO struct {
+	Enabled      bool   `json:"enabled"`
+	AutoSSL      bool   `json:"auto_ssl"`
+	AutoSSLEmail string `json:"auto_ssl_email,omitempty"`
+	Port         int    `json:"ssl_port"`
+	CertPath     string `json:"cert_path,omitempty"`
+	KeyPath      string `json:"key_path,omitempty"`
+	Hostname     string `json:"hostname,omitempty"`
+}
+
 // LimitsConfigDTO represents limits configuration for API
 type LimitsConfigDTO struct {
 	MaxClients           int `json:"max_clients"`
@@ -64,12 +75,15 @@ type MountConfigDTO struct {
 
 // FullConfigDTO represents the complete configuration for API
 type FullConfigDTO struct {
-	Server       ServerConfigDTO           `json:"server"`
-	Limits       LimitsConfigDTO           `json:"limits"`
-	Auth         AuthConfigDTO             `json:"auth"`
-	Mounts       map[string]MountConfigDTO `json:"mounts"`
-	HasOverrides bool                      `json:"has_overrides"`
-	LastModified string                    `json:"last_modified,omitempty"`
+	Server        ServerConfigDTO           `json:"server"`
+	SSL           SSLConfigDTO              `json:"ssl"`
+	Limits        LimitsConfigDTO           `json:"limits"`
+	Auth          AuthConfigDTO             `json:"auth"`
+	Mounts        map[string]MountConfigDTO `json:"mounts"`
+	HasOverrides  bool                      `json:"has_overrides"`
+	LastModified  string                    `json:"last_modified,omitempty"`
+	ZeroConfig    bool                      `json:"zero_config"`
+	SetupComplete bool                      `json:"setup_complete"`
 }
 
 // handleAdminConfig routes config API requests
@@ -93,6 +107,14 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		s.handleExportConfig(w, r)
 	case path == "/admin/config/server" && r.Method == http.MethodPost:
 		s.handleUpdateServerConfig(w, r)
+	case path == "/admin/config/ssl" && r.Method == http.MethodGet:
+		s.handleGetSSLConfig(w, r)
+	case path == "/admin/config/ssl" && r.Method == http.MethodPost:
+		s.handleUpdateSSLConfig(w, r)
+	case path == "/admin/config/ssl/enable" && r.Method == http.MethodPost:
+		s.handleEnableAutoSSL(w, r)
+	case path == "/admin/config/ssl/disable" && r.Method == http.MethodPost:
+		s.handleDisableSSL(w, r)
 	case path == "/admin/config/limits" && r.Method == http.MethodPost:
 		s.handleUpdateLimitsConfig(w, r)
 	case path == "/admin/config/auth" && r.Method == http.MethodPost:
@@ -117,6 +139,15 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			Port:     cfg.Server.Port,
 			SSLPort:  cfg.Server.SSLPort,
 		},
+		SSL: SSLConfigDTO{
+			Enabled:      cfg.Server.SSLEnabled,
+			AutoSSL:      cfg.Server.AutoSSL,
+			AutoSSLEmail: cfg.Server.AutoSSLEmail,
+			Port:         cfg.Server.SSLPort,
+			CertPath:     cfg.Server.SSLCert,
+			KeyPath:      cfg.Server.SSLKey,
+			Hostname:     cfg.Server.Hostname,
+		},
 		Limits: LimitsConfigDTO{
 			MaxClients:           cfg.Limits.MaxClients,
 			MaxSources:           cfg.Limits.MaxSources,
@@ -129,9 +160,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			AdminUser:      cfg.Admin.User,
 			// Don't expose admin password
 		},
-		Mounts:       make(map[string]MountConfigDTO),
-		HasOverrides: s.configManager.HasStateOverrides(),
-		LastModified: state.LastModified.Format(time.RFC3339),
+		Mounts:        make(map[string]MountConfigDTO),
+		HasOverrides:  s.configManager.HasStateOverrides(),
+		LastModified:  state.LastModified.Format(time.RFC3339),
+		ZeroConfig:    s.configManager.IsZeroConfigMode(),
+		SetupComplete: s.configManager.IsSetupComplete(),
 	}
 
 	for path, mount := range cfg.Mounts {
@@ -163,7 +196,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update server config
-	if err := s.configManager.UpdateServer(&dto.Server.Hostname, &dto.Server.Location, &dto.Server.ServerID); err != nil {
+	if err := s.configManager.UpdateServer(&dto.Server.Hostname, &dto.Server.Location, &dto.Server.ServerID, nil); err != nil {
 		s.jsonError(w, "Failed to update server config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -230,7 +263,7 @@ func (s *Server) handleUpdateServerConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.configManager.UpdateServer(&dto.Hostname, &dto.Location, &dto.ServerID); err != nil {
+	if err := s.configManager.UpdateServer(&dto.Hostname, &dto.Location, &dto.ServerID, nil); err != nil {
 		s.jsonError(w, "Failed to update server config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -238,6 +271,91 @@ func (s *Server) handleUpdateServerConfig(w http.ResponseWriter, r *http.Request
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
 		Message: "Server configuration updated",
+	})
+}
+
+// handleGetSSLConfig returns the current SSL configuration
+func (s *Server) handleGetSSLConfig(w http.ResponseWriter, r *http.Request) {
+	cfg := s.configManager.GetConfig()
+
+	dto := SSLConfigDTO{
+		Enabled:      cfg.Server.SSLEnabled,
+		AutoSSL:      cfg.Server.AutoSSL,
+		AutoSSLEmail: cfg.Server.AutoSSLEmail,
+		Port:         cfg.Server.SSLPort,
+		CertPath:     cfg.Server.SSLCert,
+		KeyPath:      cfg.Server.SSLKey,
+		Hostname:     cfg.Server.Hostname,
+	}
+
+	s.jsonSuccess(w, dto)
+}
+
+// handleUpdateSSLConfig updates SSL configuration
+func (s *Server) handleUpdateSSLConfig(w http.ResponseWriter, r *http.Request) {
+	var dto SSLConfigDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		s.jsonError(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.configManager.UpdateSSL(
+		&dto.Enabled,
+		&dto.AutoSSL,
+		&dto.Port,
+		&dto.AutoSSLEmail,
+		&dto.CertPath,
+		&dto.KeyPath,
+		nil,
+	); err != nil {
+		s.jsonError(w, "Failed to update SSL config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.jsonResponse(w, ConfigAPIResponse{
+		Success: true,
+		Message: "SSL configuration updated. Restart server to apply changes.",
+	})
+}
+
+// handleEnableAutoSSL enables automatic SSL with Let's Encrypt
+func (s *Server) handleEnableAutoSSL(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Hostname string `json:"hostname"`
+		Email    string `json:"email"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Hostname == "" || req.Hostname == "localhost" {
+		s.jsonError(w, "A valid public hostname is required for AutoSSL", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.configManager.EnableAutoSSL(req.Hostname, req.Email); err != nil {
+		s.jsonError(w, "Failed to enable AutoSSL: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.jsonResponse(w, ConfigAPIResponse{
+		Success: true,
+		Message: "AutoSSL enabled. Restart server to obtain certificate.",
+	})
+}
+
+// handleDisableSSL disables SSL
+func (s *Server) handleDisableSSL(w http.ResponseWriter, r *http.Request) {
+	if err := s.configManager.DisableSSL(); err != nil {
+		s.jsonError(w, "Failed to disable SSL: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.jsonResponse(w, ConfigAPIResponse{
+		Success: true,
+		Message: "SSL disabled. Restart server to apply changes.",
 	})
 }
 

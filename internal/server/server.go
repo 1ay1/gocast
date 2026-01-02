@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"path/filepath"
+
 	"github.com/gocast/gocast/internal/config"
 	"github.com/gocast/gocast/internal/source"
 	"github.com/gocast/gocast/internal/stream"
@@ -32,6 +34,8 @@ type Server struct {
 	mountManager    *stream.MountManager
 	httpServer      *http.Server
 	httpsServer     *http.Server
+	httpChallenge   *http.Server // HTTP server for ACME challenges when using AutoSSL
+	autoSSL         *AutoSSLManager
 	listenerHandler *ListenerHandler
 	sourceHandler   *source.Handler
 	metadataHandler *source.MetadataHandler
@@ -146,6 +150,66 @@ func (s *Server) GetConfigManager() *config.ConfigManager {
 	return s.configManager
 }
 
+// NewWithSetupManager creates a new GoCast server with zero-config mode
+// All settings are managed through the admin panel and persisted to state
+func NewWithSetupManager(dataDir string, logger *log.Logger) (*Server, error) {
+	if logger == nil {
+		logger = log.Default()
+	}
+
+	// Create config manager in zero-config mode
+	cm, err := config.NewZeroConfigManager(dataDir, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize config manager: %w", err)
+	}
+
+	cfg := cm.GetConfig()
+	mm := stream.NewMountManager(cfg)
+
+	startTime := time.Now()
+	logBuffer := NewLogBuffer(1000)
+	activityBuffer := NewActivityBuffer(500)
+
+	// Set AutoSSL cache directory if not set
+	if cfg.Server.AutoSSL && cfg.Server.AutoSSLCache == "" {
+		cfg.Server.AutoSSLCache = filepath.Join(cm.GetDataDir(), "certs")
+	}
+
+	s := &Server{
+		config:          cfg,
+		configManager:   cm,
+		mountManager:    mm,
+		listenerHandler: NewListenerHandlerWithActivity(mm, cfg, logger, activityBuffer),
+		sourceHandler:   source.NewHandler(mm, cfg, logger),
+		metadataHandler: source.NewMetadataHandler(mm, cfg, logger),
+		statusHandler:   NewStatusHandlerWithInfo(mm, cfg, startTime, Version),
+		logger:          logger,
+		startTime:       startTime,
+		sessionTokens:   make(map[string]time.Time),
+		logBuffer:       logBuffer,
+		activityBuffer:  activityBuffer,
+	}
+
+	// Log server start
+	activityBuffer.Add(ActivityServerStart, "GoCast server started (zero-config mode)", map[string]interface{}{
+		"version": Version,
+		"port":    cfg.Server.Port,
+	})
+
+	// Register for config changes
+	cm.OnChange(func(newCfg *config.Config) {
+		s.mu.Lock()
+		s.config = newCfg
+		s.mu.Unlock()
+		s.logger.Println("Configuration updated")
+	})
+
+	// Clean up expired tokens periodically
+	go s.cleanupTokens()
+
+	return s, nil
+}
+
 // cleanupTokens removes expired session tokens
 func (s *Server) cleanupTokens() {
 	ticker := time.NewTicker(5 * time.Minute)
@@ -184,6 +248,11 @@ func (s *Server) Start() error {
 	// Create main router
 	mux := s.createRouter()
 
+	// Check if AutoSSL is enabled
+	if s.config.Server.AutoSSL {
+		return s.startWithAutoSSL(mux)
+	}
+
 	// Create HTTP server
 	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.Server.Port)
 	s.httpServer = &http.Server{
@@ -209,6 +278,52 @@ func (s *Server) Start() error {
 			return fmt.Errorf("failed to start HTTPS server: %w", err)
 		}
 	}
+
+	return nil
+}
+
+// startWithAutoSSL starts the server with automatic Let's Encrypt SSL
+func (s *Server) startWithAutoSSL(handler http.Handler) error {
+	s.logger.Printf("AutoSSL enabled for %s", s.config.Server.Hostname)
+
+	// Create AutoSSL manager
+	autoSSL, err := NewAutoSSLManager(
+		s.config.Server.Hostname,
+		s.config.Server.AutoSSLEmail,
+		s.config.Server.AutoSSLCache,
+		s.logger,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create AutoSSL manager: %w", err)
+	}
+	s.autoSSL = autoSSL
+
+	// Start HTTP server on port 80 for ACME challenges + redirect to HTTPS
+	sslPort := s.config.Server.SSLPort
+	if sslPort == 0 {
+		sslPort = 443
+	}
+	s.httpChallenge = autoSSL.StartHTTPChallengeServer(sslPort)
+
+	// Create HTTPS server with automatic certificates
+	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, sslPort)
+	s.httpsServer = &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		TLSConfig:         autoSSL.TLSConfig(),
+		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
+		IdleTimeout:       s.config.Limits.ClientTimeout,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	go func() {
+		s.logger.Printf("Starting GoCast HTTPS server on %s (AutoSSL)", addr)
+		if err := s.httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			s.logger.Printf("HTTPS server error: %v", err)
+		}
+	}()
+
+	s.logger.Printf("AutoSSL: Certificates will be automatically obtained and renewed for %s", s.config.Server.Hostname)
 
 	return nil
 }
@@ -300,6 +415,20 @@ func (s *Server) Stop(ctx context.Context) error {
 			if err := s.httpsServer.Shutdown(shutdownCtx); err != nil {
 				s.logger.Printf("HTTPS server shutdown error: %v, forcing close", err)
 				s.httpsServer.Close()
+			}
+		}()
+	}
+
+	// Shutdown HTTP challenge server (AutoSSL)
+	if s.httpChallenge != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := s.httpChallenge.Shutdown(shutdownCtx); err != nil {
+				s.logger.Printf("HTTP challenge server shutdown error: %v", err)
+				s.httpChallenge.Close()
 			}
 		}()
 	}

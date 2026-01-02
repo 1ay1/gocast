@@ -31,6 +31,10 @@ type ServerConfig struct {
 	AdminRoot     string
 	Location      string
 	ServerID      string
+	// AutoSSL settings for automatic Let's Encrypt certificates
+	AutoSSL      bool
+	AutoSSLEmail string
+	AutoSSLCache string
 }
 
 // LimitsConfig contains resource limits
@@ -108,6 +112,9 @@ func DefaultConfig() *Config {
 			AdminRoot:     "/admin",
 			Location:      "Earth",
 			ServerID:      "GoCast",
+			AutoSSL:       false,
+			AutoSSLEmail:  "",
+			AutoSSLCache:  "/var/lib/gocast/certs",
 		},
 		Limits: LimitsConfig{
 			MaxClients:           100,
@@ -163,6 +170,9 @@ func Load(filename string) (*Config, error) {
 		cfg.Server.SSLEnabled = v.GetBoolDefault("server.ssl.enabled", cfg.Server.SSLEnabled)
 		cfg.Server.SSLCert = v.GetStringDefault("server.ssl.cert", cfg.Server.SSLCert)
 		cfg.Server.SSLKey = v.GetStringDefault("server.ssl.key", cfg.Server.SSLKey)
+		cfg.Server.AutoSSL = v.GetBoolDefault("server.auto_ssl", cfg.Server.AutoSSL)
+		cfg.Server.AutoSSLEmail = v.GetStringDefault("server.auto_ssl_email", cfg.Server.AutoSSLEmail)
+		cfg.Server.AutoSSLCache = v.GetStringDefault("server.auto_ssl_cache", cfg.Server.AutoSSLCache)
 		cfg.Server.AdminRoot = v.GetStringDefault("server.admin_root", cfg.Server.AdminRoot)
 		cfg.Server.Location = v.GetStringDefault("server.location", cfg.Server.Location)
 		cfg.Server.ServerID = v.GetStringDefault("server.server_id", cfg.Server.ServerID)
@@ -287,12 +297,18 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid server port: %d", c.Server.Port)
 	}
 
-	if c.Server.SSLEnabled {
+	if c.Server.SSLEnabled && !c.Server.AutoSSL {
 		if c.Server.SSLCert == "" {
-			return fmt.Errorf("SSL enabled but no certificate path specified")
+			return fmt.Errorf("SSL enabled but no certificate path specified (use auto_ssl for automatic certificates)")
 		}
 		if c.Server.SSLKey == "" {
-			return fmt.Errorf("SSL enabled but no key path specified")
+			return fmt.Errorf("SSL enabled but no key path specified (use auto_ssl for automatic certificates)")
+		}
+	}
+
+	if c.Server.AutoSSL {
+		if c.Server.Hostname == "" || c.Server.Hostname == "localhost" {
+			return fmt.Errorf("auto_ssl requires a valid public hostname (not localhost)")
 		}
 	}
 

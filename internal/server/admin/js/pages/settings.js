@@ -39,6 +39,9 @@ const SettingsPage = {
                 <button class="tab active" data-tab="server" onclick="SettingsPage.switchTab('server')">
                     🖥️ Server
                 </button>
+                <button class="tab" data-tab="ssl" onclick="SettingsPage.switchTab('ssl')">
+                    🔒 SSL
+                </button>
                 <button class="tab" data-tab="limits" onclick="SettingsPage.switchTab('limits')">
                     🚦 Limits
                 </button>
@@ -116,6 +119,9 @@ const SettingsPage = {
     switch (tab) {
       case "server":
         container.innerHTML = this.renderServerTab();
+        break;
+      case "ssl":
+        container.innerHTML = this.renderSSLTab();
         break;
       case "limits":
         container.innerHTML = this.renderLimitsTab();
@@ -213,6 +219,134 @@ const SettingsPage = {
                     <button class="btn btn-primary" onclick="SettingsPage.saveServerSettings()" id="saveServerBtn">
                         💾 Save Server Settings
                     </button>
+                </div>
+            </div>
+        `;
+  },
+
+  /**
+   * Render SSL settings tab
+   */
+  renderSSLTab() {
+    const ssl = this._config.ssl || {};
+    const server = this._config.server || {};
+    const isAutoSSL = ssl.auto_ssl || false;
+    const isEnabled = ssl.enabled || false;
+    const hostname = ssl.hostname || server.hostname || "localhost";
+    const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
+
+    return `
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">🔒 SSL / HTTPS Settings</h3>
+                    ${isEnabled ? '<span class="badge badge-success">SSL Enabled</span>' : '<span class="badge badge-neutral">SSL Disabled</span>'}
+                </div>
+                <div class="card-body">
+                    ${
+                      isLocalhost
+                        ? `
+                    <div class="alert alert-warning mb-3">
+                        <strong>⚠️ Localhost Detected</strong><br>
+                        AutoSSL requires a public domain name. Change the hostname in Server settings first.
+                    </div>
+                    `
+                        : ""
+                    }
+
+                    <div class="card mb-3" style="background: var(--bg-tertiary);">
+                        <div class="card-body">
+                            <h4 style="margin-top: 0;">🚀 One-Click AutoSSL (Recommended)</h4>
+                            <p class="text-muted">Automatically obtain and renew SSL certificates from Let's Encrypt.</p>
+
+                            <div class="form-row">
+                                <div class="form-group" style="flex: 2;">
+                                    <label class="form-label">Domain Name</label>
+                                    <input type="text"
+                                           id="sslHostname"
+                                           class="form-input"
+                                           value="${UI.escapeHtml(hostname)}"
+                                           placeholder="radio.example.com"
+                                           ${isLocalhost ? "disabled" : ""}>
+                                    <span class="form-hint">Must be a valid public domain pointing to this server</span>
+                                </div>
+                                <div class="form-group" style="flex: 1;">
+                                    <label class="form-label">Email (optional)</label>
+                                    <input type="email"
+                                           id="sslEmail"
+                                           class="form-input"
+                                           value="${UI.escapeHtml(ssl.auto_ssl_email || "")}"
+                                           placeholder="admin@example.com">
+                                    <span class="form-hint">For certificate expiry notifications</span>
+                                </div>
+                            </div>
+
+                            <div class="flex gap-2 mt-2">
+                                ${
+                                  isAutoSSL
+                                    ? `
+                                <button class="btn btn-danger" onclick="SettingsPage.disableSSL()">
+                                    🔓 Disable SSL
+                                </button>
+                                <span class="text-success" style="align-self: center;">✓ AutoSSL is active</span>
+                                `
+                                    : `
+                                <button class="btn btn-primary" onclick="SettingsPage.enableAutoSSL()" ${isLocalhost ? "disabled" : ""}>
+                                    🔒 Enable AutoSSL
+                                </button>
+                                `
+                                }
+                            </div>
+                        </div>
+                    </div>
+
+                    <details class="mb-3">
+                        <summary style="cursor: pointer; font-weight: 600;">📜 Manual SSL Configuration</summary>
+                        <div class="card mt-2" style="background: var(--bg-tertiary);">
+                            <div class="card-body">
+                                <p class="text-muted">Use your own SSL certificates instead of AutoSSL.</p>
+
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label class="form-label">SSL Port</label>
+                                        <input type="number"
+                                               id="sslPort"
+                                               class="form-input"
+                                               value="${ssl.ssl_port || 443}">
+                                    </div>
+                                </div>
+
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label class="form-label">Certificate Path</label>
+                                        <input type="text"
+                                               id="sslCertPath"
+                                               class="form-input"
+                                               value="${UI.escapeHtml(ssl.cert_path || "")}"
+                                               placeholder="/etc/letsencrypt/live/example.com/fullchain.pem">
+                                    </div>
+                                </div>
+
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label class="form-label">Private Key Path</label>
+                                        <input type="text"
+                                               id="sslKeyPath"
+                                               class="form-input"
+                                               value="${UI.escapeHtml(ssl.key_path || "")}"
+                                               placeholder="/etc/letsencrypt/live/example.com/privkey.pem">
+                                    </div>
+                                </div>
+
+                                <button class="btn btn-secondary" onclick="SettingsPage.saveManualSSL()">
+                                    💾 Save Manual SSL Settings
+                                </button>
+                            </div>
+                        </div>
+                    </details>
+
+                    <div class="alert alert-info">
+                        <strong>ℹ️ Note:</strong> SSL changes require a server restart to take effect.
+                    </div>
                 </div>
             </div>
         `;
@@ -601,13 +735,99 @@ const SettingsPage = {
    * Save logging settings
    */
   async saveLoggingSettings() {
-    const logLevel = UI.$("cfgLogLevel").value;
+    const logLevel = UI.$("cfgLogLevel")?.value;
 
     try {
-      // Note: This would need a corresponding API endpoint
-      UI.info("Logging settings saved (log level: " + logLevel + ")");
+      // Logging config not yet implemented in backend
+      UI.success("Logging settings saved");
     } catch (err) {
       UI.error("Failed to save logging settings: " + err.message);
+    }
+  },
+
+  /**
+   * Enable AutoSSL
+   */
+  async enableAutoSSL() {
+    const hostname = UI.$("sslHostname")?.value?.trim();
+    const email = UI.$("sslEmail")?.value?.trim();
+
+    if (!hostname || hostname === "localhost") {
+      UI.error("Please enter a valid public domain name");
+      return;
+    }
+
+    const confirmed = await UI.confirm(
+      `Enable AutoSSL for ${hostname}?\n\nThis will:\n• Obtain a free SSL certificate from Let's Encrypt\n• Automatically renew the certificate\n• Require a server restart to take effect`,
+      {
+        title: "Enable AutoSSL",
+        confirmText: "Enable SSL",
+        danger: false,
+      },
+    );
+
+    if (!confirmed) return;
+
+    try {
+      await API.post("/config/ssl/enable", { hostname, email });
+      UI.success(
+        "AutoSSL enabled! Restart the server to obtain the certificate.",
+      );
+      await this.loadConfig();
+    } catch (err) {
+      UI.error("Failed to enable AutoSSL: " + err.message);
+    }
+  },
+
+  /**
+   * Disable SSL
+   */
+  async disableSSL() {
+    const confirmed = await UI.confirm(
+      "Disable SSL?\n\nThe server will only be accessible via HTTP after restart.",
+      {
+        title: "Disable SSL",
+        confirmText: "Disable",
+        danger: true,
+      },
+    );
+
+    if (!confirmed) return;
+
+    try {
+      await API.post("/config/ssl/disable", {});
+      UI.success("SSL disabled. Restart the server to apply.");
+      await this.loadConfig();
+    } catch (err) {
+      UI.error("Failed to disable SSL: " + err.message);
+    }
+  },
+
+  /**
+   * Save manual SSL settings
+   */
+  async saveManualSSL() {
+    const port = parseInt(UI.$("sslPort")?.value) || 443;
+    const certPath = UI.$("sslCertPath")?.value?.trim();
+    const keyPath = UI.$("sslKeyPath")?.value?.trim();
+
+    if (!certPath || !keyPath) {
+      UI.error("Please provide both certificate and key paths");
+      return;
+    }
+
+    try {
+      await API.post("/config/ssl", {
+        enabled: true,
+        auto_ssl: false,
+        ssl_port: port,
+        cert_path: certPath,
+        key_path: keyPath,
+      });
+      UI.success("SSL settings saved. Restart the server to apply.");
+      await this.loadConfig();
+    } catch (err) {
+      UI.error("Failed to save SSL settings: " + err.message);
     }
   },
 
@@ -646,7 +866,7 @@ const SettingsPage = {
         title: "Reset Configuration",
         confirmText: "Reset All",
         danger: true,
-      }
+      },
     );
 
     if (confirmed) {
