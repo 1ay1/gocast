@@ -40,9 +40,10 @@ const (
 
 // ListenerHandler handles listener HTTP requests
 type ListenerHandler struct {
-	mountManager *stream.MountManager
-	config       *config.Config
-	logger       *log.Logger
+	mountManager   *stream.MountManager
+	config         *config.Config
+	logger         *log.Logger
+	activityBuffer *ActivityBuffer
 
 	// Buffer pool to reduce allocations
 	bufPool sync.Pool
@@ -50,13 +51,19 @@ type ListenerHandler struct {
 
 // NewListenerHandler creates a new listener handler
 func NewListenerHandler(mm *stream.MountManager, cfg *config.Config, logger *log.Logger) *ListenerHandler {
+	return NewListenerHandlerWithActivity(mm, cfg, logger, nil)
+}
+
+// NewListenerHandlerWithActivity creates a listener handler with activity logging
+func NewListenerHandlerWithActivity(mm *stream.MountManager, cfg *config.Config, logger *log.Logger, ab *ActivityBuffer) *ListenerHandler {
 	if logger == nil {
 		logger = log.Default()
 	}
 	return &ListenerHandler{
-		mountManager: mm,
-		config:       cfg,
-		logger:       logger,
+		mountManager:   mm,
+		config:         cfg,
+		logger:         logger,
+		activityBuffer: ab,
 		bufPool: sync.Pool{
 			New: func() interface{} {
 				buf := make([]byte, streamChunkSize)
@@ -97,7 +104,20 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Create listener
 	listener := stream.NewListener(clientIP, r.UserAgent())
 	mount.AddListener(listener)
-	defer mount.RemoveListener(listener)
+	connectTime := time.Now()
+
+	// Log listener connect
+	if h.activityBuffer != nil {
+		h.activityBuffer.ListenerConnected(mountPath, clientIP, r.UserAgent())
+	}
+
+	defer func() {
+		mount.RemoveListener(listener)
+		// Log listener disconnect
+		if h.activityBuffer != nil {
+			h.activityBuffer.ListenerDisconnected(mountPath, clientIP, time.Since(connectTime))
+		}
+	}()
 
 	// Check for ICY metadata request
 	metadataInterval := 0
@@ -489,11 +509,18 @@ func (h *ListenerHandler) HandleOptions(w http.ResponseWriter, r *http.Request) 
 type StatusHandler struct {
 	mountManager *stream.MountManager
 	config       *config.Config
+	startTime    time.Time
+	version      string
 }
 
 // NewStatusHandler creates a new status handler
 func NewStatusHandler(mm *stream.MountManager, cfg *config.Config) *StatusHandler {
-	return &StatusHandler{mountManager: mm, config: cfg}
+	return &StatusHandler{mountManager: mm, config: cfg, startTime: time.Now(), version: "1.0.0"}
+}
+
+// NewStatusHandlerWithInfo creates a new status handler with server info
+func NewStatusHandlerWithInfo(mm *stream.MountManager, cfg *config.Config, startTime time.Time, version string) *StatusHandler {
+	return &StatusHandler{mountManager: mm, config: cfg, startTime: startTime, version: version}
 }
 
 // ServeHTTP serves the status page
@@ -514,7 +541,16 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 
 	mounts := h.mountManager.ListMounts()
 	var sb strings.Builder
-	sb.WriteString(`{"mounts":[`)
+
+	// Server info
+	uptime := int64(time.Since(h.startTime).Seconds())
+	serverID := h.config.Server.ServerID
+	if serverID == "" {
+		serverID = "GoCast"
+	}
+
+	sb.WriteString(fmt.Sprintf(`{"server_id":%q,"version":%q,"started":%q,"uptime":%d,"host":%q,"mounts":[`,
+		serverID, h.version, h.startTime.Format(time.RFC3339), uptime, h.config.Server.Hostname))
 
 	for i, mountPath := range mounts {
 		if i > 0 {

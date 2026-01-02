@@ -7,6 +7,9 @@ const DashboardPage = {
   // Update interval
   _interval: null,
 
+  // Previous stats for change detection
+  _prevStats: null,
+
   /**
    * Render the dashboard page
    */
@@ -88,7 +91,7 @@ const DashboardPage = {
                                 <span class="text-muted">Connections</span>
                                 <span id="connValue">0 / 100</span>
                             </div>
-                            ${UI.progressBar(0, '')}
+                            ${UI.progressBar(0, "")}
                             <div id="connProgress"></div>
                         </div>
 
@@ -97,7 +100,7 @@ const DashboardPage = {
                                 <span class="text-muted">Sources</span>
                                 <span id="srcValue">0 / 10</span>
                             </div>
-                            ${UI.progressBar(0, '')}
+                            ${UI.progressBar(0, "")}
                             <div id="srcProgress"></div>
                         </div>
 
@@ -106,7 +109,7 @@ const DashboardPage = {
                                 <span class="text-muted">Memory</span>
                                 <span id="memValue">--</span>
                             </div>
-                            ${UI.progressBar(0, '')}
+                            ${UI.progressBar(0, "")}
                             <div id="memProgress"></div>
                         </div>
 
@@ -115,7 +118,7 @@ const DashboardPage = {
                                 <span class="text-muted">Buffer Health</span>
                                 <span id="bufValue">100%</span>
                             </div>
-                            ${UI.progressBar(100, 'success')}
+                            ${UI.progressBar(100, "success")}
                             <div id="bufProgress"></div>
                         </div>
                     </div>
@@ -128,6 +131,8 @@ const DashboardPage = {
    * Initialize the dashboard
    */
   async init() {
+    this._prevStats = null;
+
     // Start periodic updates
     this.update();
     this._interval = setInterval(() => this.update(), 2000);
@@ -136,6 +141,13 @@ const DashboardPage = {
     API.on("stats", (data) => this.handleStatsUpdate(data));
     API.on("listener", (data) => this.handleListenerEvent(data));
     API.on("source", (data) => this.handleSourceEvent(data));
+
+    // Subscribe to activity events from server
+    API.on("activity", (data) => this.handleActivityEvent(data));
+    API.on("activity_history", (data) => this.handleActivityHistory(data));
+
+    // Load initial activity from server
+    this.loadRecentActivity();
   },
 
   /**
@@ -146,6 +158,7 @@ const DashboardPage = {
       clearInterval(this._interval);
       this._interval = null;
     }
+    this._prevStats = null;
   },
 
   /**
@@ -156,6 +169,7 @@ const DashboardPage = {
       const status = await API.getStatus();
       this.updateStats(status);
       this.updateStreamsList(status.mounts || []);
+      this.detectChanges(status.mounts || []);
     } catch (err) {
       console.error("Dashboard update error:", err);
     }
@@ -225,7 +239,7 @@ const DashboardPage = {
     if (connProgress) {
       connProgress.innerHTML = UI.progressBar(
         connPercent,
-        connPercent > 80 ? "warning" : ""
+        connPercent > 80 ? "warning" : "",
       );
     }
 
@@ -237,7 +251,7 @@ const DashboardPage = {
     if (srcProgress) {
       srcProgress.innerHTML = UI.progressBar(
         srcPercent,
-        srcPercent > 80 ? "warning" : ""
+        srcPercent > 80 ? "warning" : "",
       );
     }
   },
@@ -261,9 +275,14 @@ const DashboardPage = {
     }
 
     const activeFirst = [...mounts].sort((a, b) => {
+      // Live streams always first
       if (a.active && !b.active) return -1;
       if (!a.active && b.active) return 1;
-      return (b.listeners || 0) - (a.listeners || 0);
+      // Then by listener count (descending)
+      const listenerDiff = (b.listeners || 0) - (a.listeners || 0);
+      if (listenerDiff !== 0) return listenerDiff;
+      // Stable sort by path for consistent ordering
+      return (a.path || "").localeCompare(b.path || "");
     });
 
     container.innerHTML = activeFirst
@@ -311,7 +330,7 @@ const DashboardPage = {
                     : ""
                 }
             </div>
-        `
+        `,
       )
       .join("");
   },
@@ -327,6 +346,70 @@ const DashboardPage = {
   },
 
   /**
+   * Load recent activity from server API
+   */
+  async loadRecentActivity() {
+    try {
+      const response = await API.get("/activity?count=20");
+      if (response.success && response.data) {
+        // Add entries in reverse order (oldest first)
+        const entries = response.data.reverse();
+        entries.forEach((entry) => {
+          this.addActivityFromServer(entry);
+        });
+      }
+    } catch (err) {
+      console.error("Failed to load activity:", err);
+    }
+  },
+
+  /**
+   * Handle activity event from SSE
+   */
+  handleActivityEvent(data) {
+    this.addActivityFromServer(data);
+  },
+
+  /**
+   * Handle activity history from SSE on connect
+   */
+  handleActivityHistory(data) {
+    if (data.entries && Array.isArray(data.entries)) {
+      // Clear existing and add history
+      const container = UI.$("activityList");
+      if (container) {
+        container.innerHTML = "";
+      }
+      data.entries.forEach((entry) => {
+        this.addActivityFromServer(entry);
+      });
+    }
+  },
+
+  /**
+   * Add activity entry from server data
+   */
+  addActivityFromServer(entry) {
+    const typeMap = {
+      listener_connect: "connect",
+      listener_disconnect: "disconnect",
+      source_start: "source",
+      source_stop: "source",
+      config_change: "config",
+      mount_create: "config",
+      mount_delete: "config",
+      server_start: "info",
+      server_stop: "error",
+      admin_action: "config",
+    };
+
+    const type = typeMap[entry.type] || "info";
+    const time = entry.timestamp ? new Date(entry.timestamp) : new Date();
+
+    this.addActivity(type, entry.message, time);
+  },
+
+  /**
    * Handle listener event
    */
   handleListenerEvent(data) {
@@ -334,7 +417,10 @@ const DashboardPage = {
     const mount = data.mount || "unknown";
     const message = `Listener ${action} on ${mount}`;
 
-    this.addActivity(action === "disconnected" ? "disconnect" : "connect", message);
+    this.addActivity(
+      action === "disconnected" ? "disconnect" : "connect",
+      message,
+    );
   },
 
   /**
@@ -354,7 +440,7 @@ const DashboardPage = {
   /**
    * Add activity entry
    */
-  addActivity(type, message) {
+  addActivity(type, message, time = null) {
     const container = UI.$("activityList");
     if (!container) return;
 
@@ -370,12 +456,15 @@ const DashboardPage = {
       source: "📡",
       config: "⚙️",
       error: "⚠️",
+      info: "ℹ️",
     };
+
+    const displayTime = time || new Date();
 
     const entry = document.createElement("div");
     entry.className = "log-entry";
     entry.innerHTML = `
-            <span class="log-time">${UI.formatTime(new Date())}</span>
+            <span class="log-time">${UI.formatTime(displayTime)}</span>
             <span class="log-type">${typeIcons[type] || "ℹ️"}</span>
             <span class="log-message">${UI.escapeHtml(message)}</span>
         `;
@@ -427,7 +516,7 @@ const DashboardPage = {
         title: "Stop Source",
         confirmText: "Stop Source",
         danger: true,
-      }
+      },
     );
 
     if (confirmed) {

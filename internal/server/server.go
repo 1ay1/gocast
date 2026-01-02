@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,9 @@ type Server struct {
 	// Session tokens for authenticated SSE connections
 	sessionTokens map[string]time.Time
 	tokenMu       sync.RWMutex
+	// Log and activity buffers for admin panel
+	logBuffer      *LogBuffer
+	activityBuffer *ActivityBuffer
 }
 
 // generateToken creates a secure random token
@@ -58,18 +62,30 @@ func New(cfg *config.Config, logger *log.Logger) *Server {
 
 	mm := stream.NewMountManager(cfg)
 
+	startTime := time.Now()
+	logBuffer := NewLogBuffer(1000)
+	activityBuffer := NewActivityBuffer(500)
+
 	s := &Server{
 		config:          cfg,
 		configManager:   nil,
 		mountManager:    mm,
-		listenerHandler: NewListenerHandler(mm, cfg, logger),
+		listenerHandler: NewListenerHandlerWithActivity(mm, cfg, logger, activityBuffer),
 		sourceHandler:   source.NewHandler(mm, cfg, logger),
 		metadataHandler: source.NewMetadataHandler(mm, cfg, logger),
-		statusHandler:   NewStatusHandler(mm, cfg),
+		statusHandler:   NewStatusHandlerWithInfo(mm, cfg, startTime, Version),
 		logger:          logger,
-		startTime:       time.Now(),
+		startTime:       startTime,
 		sessionTokens:   make(map[string]time.Time),
+		logBuffer:       logBuffer,
+		activityBuffer:  activityBuffer,
 	}
+
+	// Log server start
+	activityBuffer.Add(ActivityServerStart, "GoCast server started", map[string]interface{}{
+		"version": Version,
+		"port":    cfg.Server.Port,
+	})
 
 	// Clean up expired tokens periodically
 	go s.cleanupTokens()
@@ -86,18 +102,30 @@ func NewWithConfigManager(cm *config.ConfigManager, logger *log.Logger) *Server 
 	cfg := cm.GetConfig()
 	mm := stream.NewMountManager(cfg)
 
+	startTime := time.Now()
+	logBuffer := NewLogBuffer(1000)
+	activityBuffer := NewActivityBuffer(500)
+
 	s := &Server{
 		config:          cfg,
 		configManager:   cm,
 		mountManager:    mm,
-		listenerHandler: NewListenerHandler(mm, cfg, logger),
+		listenerHandler: NewListenerHandlerWithActivity(mm, cfg, logger, activityBuffer),
 		sourceHandler:   source.NewHandler(mm, cfg, logger),
 		metadataHandler: source.NewMetadataHandler(mm, cfg, logger),
-		statusHandler:   NewStatusHandler(mm, cfg),
+		statusHandler:   NewStatusHandlerWithInfo(mm, cfg, startTime, Version),
 		logger:          logger,
-		startTime:       time.Now(),
+		startTime:       startTime,
 		sessionTokens:   make(map[string]time.Time),
+		logBuffer:       logBuffer,
+		activityBuffer:  activityBuffer,
 	}
+
+	// Log server start
+	activityBuffer.Add(ActivityServerStart, "GoCast server started", map[string]interface{}{
+		"version": Version,
+		"port":    cfg.Server.Port,
+	})
 
 	// Register for config changes
 	cm.OnChange(func(newCfg *config.Config) {
@@ -275,8 +303,8 @@ func (s *Server) createRouter() http.Handler {
 			return
 		}
 
-		// Admin static assets (CSS, JS, including nested paths like js/pages/)
-		if strings.HasPrefix(path, "/admin/css/") || strings.HasPrefix(path, "/admin/js/") || strings.HasPrefix(path, "/admin/pages/") {
+		// Admin static assets (CSS, JS, images, including nested paths like js/pages/)
+		if strings.HasPrefix(path, "/admin/css/") || strings.HasPrefix(path, "/admin/js/") || strings.HasPrefix(path, "/admin/pages/") || strings.HasPrefix(path, "/admin/img/") {
 			s.serveAdminStatic(w, r)
 			return
 		}
@@ -378,6 +406,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	case path == "/admin/events":
 		s.handleAdminEvents(w, r)
 
+	case path == "/admin/logs":
+		s.handleAdminLogs(w, r)
+
+	case path == "/admin/activity":
+		s.handleAdminActivity(w, r)
+
 	case strings.HasPrefix(path, "/admin/config"):
 		s.handleAdminConfig(w, r)
 
@@ -435,13 +469,40 @@ func (s *Server) handleAdminListClients(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	listeners := mount.GetListeners()
+
+	// Check if JSON is requested
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "application/json") {
+		w.Header().Set("Content-Type", "application/json")
+		var sb strings.Builder
+		sb.WriteString(`{"mount":`)
+		sb.WriteString(fmt.Sprintf("%q", mountPath))
+		sb.WriteString(`,"listeners":[`)
+
+		for i, listener := range listeners {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			connected := int(time.Since(listener.ConnectedAt).Seconds())
+			sb.WriteString(fmt.Sprintf(`{"id":%q,"ip":%q,"user_agent":%q,"connected":%d}`,
+				listener.ID, listener.IP, listener.UserAgent, connected))
+		}
+
+		sb.WriteString(`],"total":`)
+		sb.WriteString(fmt.Sprintf("%d}", len(listeners)))
+		w.Write([]byte(sb.String()))
+		return
+	}
+
+	// Default to XML for Icecast compatibility
 	w.Header().Set("Content-Type", "text/xml")
 
 	fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>`)
 	fmt.Fprint(w, "\n<icestats>")
 	fmt.Fprintf(w, "<source mount=\"%s\">", mountPath)
 
-	for _, listener := range mount.GetListeners() {
+	for _, listener := range listeners {
 		fmt.Fprint(w, "<listener>")
 		fmt.Fprintf(w, "<ID>%s</ID>", listener.ID)
 		fmt.Fprintf(w, "<IP>%s</IP>", listener.IP)
@@ -531,7 +592,25 @@ func (s *Server) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 	// Send initial data
 	s.sendSSEStats(w, flusher)
 
-	// Create ticker for updates (every 500ms for smooth updates)
+	// Send recent activity and logs on connect
+	s.sendSSERecentActivity(w, flusher)
+	s.sendSSERecentLogs(w, flusher)
+
+	// Subscribe to activity and log events
+	var activityCh chan ActivityEntry
+	var logCh chan LogEntry
+
+	if s.activityBuffer != nil {
+		activityCh = s.activityBuffer.Subscribe()
+		defer s.activityBuffer.Unsubscribe(activityCh)
+	}
+
+	if s.logBuffer != nil {
+		logCh = s.logBuffer.Subscribe()
+		defer s.logBuffer.Unsubscribe(logCh)
+	}
+
+	// Create ticker for stats updates (every 500ms for smooth updates)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -542,6 +621,14 @@ func (s *Server) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ticker.C:
 			s.sendSSEStats(w, flusher)
+		case activity, ok := <-activityCh:
+			if ok {
+				s.sendSSEActivity(w, flusher, activity)
+			}
+		case logEntry, ok := <-logCh:
+			if ok {
+				s.sendSSELog(w, flusher, logEntry)
+			}
 		}
 	}
 }
@@ -589,11 +676,17 @@ func (s *Server) handleAdminToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) sendSSEStats(w http.ResponseWriter, flusher http.Flusher) {
 	stats := s.mountManager.Stats()
 
-	// Build JSON manually for efficiency
+	// Build mounts array for the stats event
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`{"server_id":"GoCast/%s","uptime":`, Version))
+	sb.WriteString(`{"type":"stats","server_id":"GoCast/`)
+	sb.WriteString(Version)
+	sb.WriteString(`","version":"`)
+	sb.WriteString(Version)
+	sb.WriteString(`","uptime":`)
 	sb.WriteString(fmt.Sprintf("%d", int(time.Since(s.startTime).Seconds())))
-	sb.WriteString(`,"source":[`)
+	sb.WriteString(`,"started":"`)
+	sb.WriteString(s.startTime.Format(time.RFC3339))
+	sb.WriteString(`","mounts":[`)
 
 	for i, stat := range stats {
 		if i > 0 {
@@ -604,8 +697,8 @@ func (s *Server) sendSSEStats(w http.ResponseWriter, flusher http.Flusher) {
 			title = stat.Metadata.Name
 		}
 		sb.WriteString(fmt.Sprintf(
-			`{"mount":"%s","listeners":%d,"peak":%d,"active":%v,"title":"%s","artist":"%s","album":"%s","name":"%s","genre":"%s","description":"%s","bitrate":%d,"content_type":"%s"}`,
-			stat.Path, stat.Listeners, stat.PeakListeners, stat.Active,
+			`{"path":"%s","mount":"%s","listeners":%d,"peak":%d,"active":%v,"title":"%s","artist":"%s","album":"%s","name":"%s","genre":"%s","description":"%s","bitrate":%d,"content_type":"%s"}`,
+			stat.Path, stat.Path, stat.Listeners, stat.PeakListeners, stat.Active,
 			escapeJSON(title), escapeJSON(stat.Metadata.Artist), escapeJSON(stat.Metadata.Album),
 			escapeJSON(stat.Metadata.Name), escapeJSON(stat.Metadata.Genre),
 			escapeJSON(stat.Metadata.Description), stat.Metadata.Bitrate, stat.ContentType,
@@ -613,8 +706,157 @@ func (s *Server) sendSSEStats(w http.ResponseWriter, flusher http.Flusher) {
 	}
 	sb.WriteString("]}")
 
-	fmt.Fprintf(w, "data: %s\n\n", sb.String())
+	// Send as named event for proper SSE handling
+	fmt.Fprintf(w, "event: stats\ndata: %s\n\n", sb.String())
 	flusher.Flush()
+}
+
+// sendSSEActivity sends a single activity entry via SSE
+func (s *Server) sendSSEActivity(w http.ResponseWriter, flusher http.Flusher, activity ActivityEntry) {
+	data := fmt.Sprintf(`{"id":%d,"timestamp":"%s","type":"%s","message":"%s"}`,
+		activity.ID, activity.Timestamp.Format(time.RFC3339),
+		activity.Type, escapeJSON(activity.Message))
+
+	fmt.Fprintf(w, "event: activity\ndata: %s\n\n", data)
+	flusher.Flush()
+}
+
+// sendSSELog sends a single log entry via SSE
+func (s *Server) sendSSELog(w http.ResponseWriter, flusher http.Flusher, logEntry LogEntry) {
+	data := fmt.Sprintf(`{"id":%d,"timestamp":"%s","level":"%s","source":"%s","message":"%s"}`,
+		logEntry.ID, logEntry.Timestamp.Format(time.RFC3339),
+		logEntry.Level, escapeJSON(logEntry.Source), escapeJSON(logEntry.Message))
+
+	fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
+	flusher.Flush()
+}
+
+// sendSSERecentActivity sends recent activity entries on SSE connect
+func (s *Server) sendSSERecentActivity(w http.ResponseWriter, flusher http.Flusher) {
+	if s.activityBuffer == nil {
+		return
+	}
+
+	entries := s.activityBuffer.GetRecent(50)
+	if len(entries) == 0 {
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`{"type":"activity_history","entries":[`)
+
+	for i, entry := range entries {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(fmt.Sprintf(`{"id":%d,"timestamp":"%s","type":"%s","message":"%s"}`,
+			entry.ID, entry.Timestamp.Format(time.RFC3339),
+			entry.Type, escapeJSON(entry.Message)))
+	}
+
+	sb.WriteString("]}")
+
+	fmt.Fprintf(w, "event: activity_history\ndata: %s\n\n", sb.String())
+	flusher.Flush()
+}
+
+// sendSSERecentLogs sends recent log entries on SSE connect
+func (s *Server) sendSSERecentLogs(w http.ResponseWriter, flusher http.Flusher) {
+	if s.logBuffer == nil {
+		return
+	}
+
+	entries := s.logBuffer.GetRecent(100)
+	if len(entries) == 0 {
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`{"type":"log_history","entries":[`)
+
+	for i, entry := range entries {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(fmt.Sprintf(`{"id":%d,"timestamp":"%s","level":"%s","source":"%s","message":"%s"}`,
+			entry.ID, entry.Timestamp.Format(time.RFC3339),
+			entry.Level, escapeJSON(entry.Source), escapeJSON(entry.Message)))
+	}
+
+	sb.WriteString("]}")
+
+	fmt.Fprintf(w, "event: log_history\ndata: %s\n\n", sb.String())
+	flusher.Flush()
+}
+
+// handleAdminLogs returns recent log entries as JSON
+func (s *Server) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if s.logBuffer == nil {
+		fmt.Fprint(w, `{"success":true,"data":[]}`)
+		return
+	}
+
+	// Get count from query, default 100
+	count := 100
+	if countStr := r.URL.Query().Get("count"); countStr != "" {
+		if n, err := strconv.Atoi(countStr); err == nil && n > 0 {
+			count = n
+		}
+	}
+
+	entries := s.logBuffer.GetRecent(count)
+
+	var sb strings.Builder
+	sb.WriteString(`{"success":true,"data":[`)
+
+	for i, entry := range entries {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(fmt.Sprintf(`{"id":%d,"timestamp":"%s","level":"%s","source":"%s","message":"%s"}`,
+			entry.ID, entry.Timestamp.Format(time.RFC3339),
+			entry.Level, escapeJSON(entry.Source), escapeJSON(entry.Message)))
+	}
+
+	sb.WriteString("]}")
+	w.Write([]byte(sb.String()))
+}
+
+// handleAdminActivity returns recent activity entries as JSON
+func (s *Server) handleAdminActivity(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if s.activityBuffer == nil {
+		fmt.Fprint(w, `{"success":true,"data":[]}`)
+		return
+	}
+
+	// Get count from query, default 50
+	count := 50
+	if countStr := r.URL.Query().Get("count"); countStr != "" {
+		if n, err := strconv.Atoi(countStr); err == nil && n > 0 {
+			count = n
+		}
+	}
+
+	entries := s.activityBuffer.GetRecent(count)
+
+	var sb strings.Builder
+	sb.WriteString(`{"success":true,"data":[`)
+
+	for i, entry := range entries {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(fmt.Sprintf(`{"id":%d,"timestamp":"%s","type":"%s","message":"%s"}`,
+			entry.ID, entry.Timestamp.Format(time.RFC3339),
+			entry.Type, escapeJSON(entry.Message)))
+	}
+
+	sb.WriteString("]}")
+	w.Write([]byte(sb.String()))
 }
 
 func (s *Server) handleAdminListMounts(w http.ResponseWriter, r *http.Request) {
@@ -797,4 +1039,50 @@ func (s *Server) Config() *config.Config {
 // StartTime returns when the server started
 func (s *Server) StartTime() time.Time {
 	return s.startTime
+}
+
+// GetLogWriter returns an io.Writer that captures logs to the log buffer
+func (s *Server) GetLogWriter(source string) *LogWriter {
+	if s.logBuffer == nil {
+		return nil
+	}
+	return NewLogWriter(s.logBuffer, LogLevelInfo, source)
+}
+
+// GetLogBuffer returns the log buffer for direct access
+func (s *Server) GetLogBuffer() *LogBuffer {
+	return s.logBuffer
+}
+
+// GetActivityBuffer returns the activity buffer for direct access
+func (s *Server) GetActivityBuffer() *ActivityBuffer {
+	return s.activityBuffer
+}
+
+// LogInfo adds an info log entry
+func (s *Server) LogInfo(source, message string) {
+	if s.logBuffer != nil {
+		s.logBuffer.AddInfo(source, message)
+	}
+}
+
+// LogError adds an error log entry
+func (s *Server) LogError(source, message string) {
+	if s.logBuffer != nil {
+		s.logBuffer.AddError(source, message)
+	}
+}
+
+// LogWarn adds a warning log entry
+func (s *Server) LogWarn(source, message string) {
+	if s.logBuffer != nil {
+		s.logBuffer.AddWarn(source, message)
+	}
+}
+
+// RecordActivity adds an activity entry
+func (s *Server) RecordActivity(actType ActivityType, message string, data map[string]interface{}) {
+	if s.activityBuffer != nil {
+		s.activityBuffer.Add(actType, message, data)
+	}
 }

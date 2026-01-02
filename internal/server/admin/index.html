@@ -1,127 +1,128 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GoCast Admin</title>
-    <link rel="stylesheet" href="/admin/css/main.css">
-    <link rel="stylesheet" href="/admin/css/components.css">
-</head>
-<body>
-    <div class="app">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-header">
-                <div class="logo">
-                    <svg class="logo-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <circle cx="24" cy="24" r="22" stroke="url(#logoGradient)" stroke-width="3" fill="none"/>
-                        <polygon points="20,14 20,34 36,24" fill="url(#logoGradient)"/>
-                        <defs>
-                            <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                <stop offset="0%" stop-color="#00d4ff"/>
-                                <stop offset="100%" stop-color="#7c3aed"/>
-                            </linearGradient>
-                        </defs>
-                    </svg>
-                    <span class="logo-text">GoCast</span>
-                </div>
-                <div class="server-status" id="serverStatus">
-                    <span class="status-dot offline"></span>
-                    <span class="status-text">Connecting...</span>
-                </div>
-            </div>
-
-            <nav class="nav">
-                <a href="#dashboard" class="nav-item active" data-page="dashboard">
-                    <span class="nav-icon">📊</span>
-                    <span class="nav-label">Dashboard</span>
-                </a>
-                <a href="#streams" class="nav-item" data-page="streams">
-                    <span class="nav-icon">📡</span>
-                    <span class="nav-label">Streams</span>
-                </a>
-                <a href="#mounts" class="nav-item" data-page="mounts">
-                    <span class="nav-icon">📻</span>
-                    <span class="nav-label">Mount Points</span>
-                </a>
-                <a href="#listeners" class="nav-item" data-page="listeners">
-                    <span class="nav-icon">👥</span>
-                    <span class="nav-label">Listeners</span>
-                </a>
-                <a href="#settings" class="nav-item" data-page="settings">
-                    <span class="nav-icon">⚙️</span>
-                    <span class="nav-label">Settings</span>
-                </a>
-                <a href="#logs" class="nav-item" data-page="logs">
-                    <span class="nav-icon">📋</span>
-                    <span class="nav-label">Logs</span>
-                </a>
-            </nav>
-
-            <div class="sidebar-footer">
-                <div class="server-info">
-                    <div class="info-row">
-                        <span class="info-label">Uptime</span>
-                        <span class="info-value" id="uptime">--:--:--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">Version</span>
-                        <span class="info-value" id="version">--</span>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>GoCast Admin</title>
+        <link rel="stylesheet" href="/admin/css/main.css" />
+        <link rel="stylesheet" href="/admin/css/components.css" />
+    </head>
+    <body>
+        <div class="app">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <div class="logo">
+                        <img
+                            src="/admin/img/logo-sidebar.svg"
+                            alt="GoCast"
+                            class="logo-icon"
+                        />
                     </div>
                 </div>
-            </div>
-        </aside>
 
-        <!-- Main Content -->
-        <main class="main">
-            <header class="header">
-                <h1 class="page-title" id="pageTitle">Dashboard</h1>
-                <div class="header-actions">
-                    <button class="btn btn-icon" id="refreshBtn" title="Refresh">
-                        <span>🔄</span>
-                    </button>
-                    <div class="connection-indicator" id="connectionIndicator">
-                        <span class="pulse"></span>
-                        <span class="label">Live</span>
+                <nav class="nav">
+                    <a
+                        href="#dashboard"
+                        class="nav-item active"
+                        data-page="dashboard"
+                    >
+                        <span class="nav-icon">📊</span>
+                        <span class="nav-label">Dashboard</span>
+                    </a>
+                    <a href="#streams" class="nav-item" data-page="streams">
+                        <span class="nav-icon">📡</span>
+                        <span class="nav-label">Streams</span>
+                    </a>
+                    <a href="#mounts" class="nav-item" data-page="mounts">
+                        <span class="nav-icon">📻</span>
+                        <span class="nav-label">Mount Points</span>
+                    </a>
+                    <a href="#listeners" class="nav-item" data-page="listeners">
+                        <span class="nav-icon">👥</span>
+                        <span class="nav-label">Listeners</span>
+                    </a>
+                    <a href="#settings" class="nav-item" data-page="settings">
+                        <span class="nav-icon">⚙️</span>
+                        <span class="nav-label">Settings</span>
+                    </a>
+                    <a href="#logs" class="nav-item" data-page="logs">
+                        <span class="nav-icon">📋</span>
+                        <span class="nav-label">Logs</span>
+                    </a>
+                </nav>
+
+                <div class="sidebar-footer">
+                    <div class="server-info">
+                        <div class="info-row">
+                            <span class="info-label">Uptime</span>
+                            <span class="info-value" id="uptime">--:--:--</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Version</span>
+                            <span class="info-value" id="version">--</span>
+                        </div>
                     </div>
                 </div>
-            </header>
+            </aside>
 
-            <div class="content" id="content">
-                <!-- Pages load here dynamically -->
-                <div class="loading">
-                    <div class="spinner"></div>
-                    <p>Loading...</p>
+            <!-- Main Content -->
+            <main class="main">
+                <header class="header">
+                    <h1 class="page-title" id="pageTitle">Dashboard</h1>
+                    <div class="header-actions">
+                        <button
+                            class="btn btn-icon"
+                            id="refreshBtn"
+                            title="Refresh"
+                        >
+                            <span>🔄</span>
+                        </button>
+                        <div
+                            class="connection-indicator"
+                            id="connectionIndicator"
+                        >
+                            <span class="pulse"></span>
+                            <span class="label">Live</span>
+                        </div>
+                    </div>
+                </header>
+
+                <div class="content" id="content">
+                    <!-- Pages load here dynamically -->
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <p>Loading...</p>
+                    </div>
                 </div>
-            </div>
-        </main>
-    </div>
-
-    <!-- Toast Container -->
-    <div class="toast-container" id="toastContainer"></div>
-
-    <!-- Modal Container -->
-    <div class="modal-overlay" id="modalOverlay">
-        <div class="modal" id="modal">
-            <div class="modal-header">
-                <h3 class="modal-title" id="modalTitle">Modal</h3>
-                <button class="modal-close" id="modalClose">&times;</button>
-            </div>
-            <div class="modal-body" id="modalBody"></div>
-            <div class="modal-footer" id="modalFooter"></div>
+            </main>
         </div>
-    </div>
 
-    <!-- Core Scripts -->
-    <script src="/admin/js/api.js"></script>
-    <script src="/admin/js/state.js"></script>
-    <script src="/admin/js/ui.js"></script>
-    <script src="/admin/js/pages/dashboard.js"></script>
-    <script src="/admin/js/pages/streams.js"></script>
-    <script src="/admin/js/pages/mounts.js"></script>
-    <script src="/admin/js/pages/listeners.js"></script>
-    <script src="/admin/js/pages/settings.js"></script>
-    <script src="/admin/js/pages/logs.js"></script>
-    <script src="/admin/js/app.js"></script>
-</body>
+        <!-- Toast Container -->
+        <div class="toast-container" id="toastContainer"></div>
+
+        <!-- Modal Container -->
+        <div class="modal-overlay" id="modalOverlay">
+            <div class="modal" id="modal">
+                <div class="modal-header">
+                    <h3 class="modal-title" id="modalTitle">Modal</h3>
+                    <button class="modal-close" id="modalClose">&times;</button>
+                </div>
+                <div class="modal-body" id="modalBody"></div>
+                <div class="modal-footer" id="modalFooter"></div>
+            </div>
+        </div>
+
+        <!-- Core Scripts -->
+        <script src="/admin/js/api.js"></script>
+        <script src="/admin/js/state.js"></script>
+        <script src="/admin/js/ui.js"></script>
+        <script src="/admin/js/pages/dashboard.js"></script>
+        <script src="/admin/js/pages/streams.js"></script>
+        <script src="/admin/js/pages/mounts.js"></script>
+        <script src="/admin/js/pages/listeners.js"></script>
+        <script src="/admin/js/pages/settings.js"></script>
+        <script src="/admin/js/pages/logs.js"></script>
+        <script src="/admin/js/app.js"></script>
+    </body>
 </html>

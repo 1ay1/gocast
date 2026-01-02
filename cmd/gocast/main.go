@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -46,7 +47,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Setup logging
+	// Setup initial logging to stdout
 	logger := log.New(os.Stdout, "[GoCast] ", log.LstdFlags|log.Lmsgprefix)
 
 	// Print banner
@@ -77,6 +78,15 @@ func main() {
 
 	// Create and start server with config manager
 	srv := server.NewWithConfigManager(configManager, logger)
+
+	// Now that server is created, redirect logs to also go to log buffer
+	logWriter := srv.GetLogWriter("server")
+	if logWriter != nil {
+		// Create a multi-writer that writes to both stdout and the log buffer
+		multiWriter := io.MultiWriter(os.Stdout, logWriter)
+		logger.SetOutput(multiWriter)
+		logger.Println("Log capture enabled for admin panel")
+	}
 
 	if err := srv.Start(); err != nil {
 		logger.Fatalf("Failed to start server: %v", err)

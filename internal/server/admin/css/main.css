@@ -42,7 +42,9 @@
 }
 
 /* ===== Reset & Base ===== */
-*, *::before, *::after {
+*,
+*::before,
+*::after {
     box-sizing: border-box;
     margin: 0;
     padding: 0;
@@ -55,7 +57,9 @@ html {
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    font-family:
+        -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+        Arial, sans-serif;
     background: var(--bg-primary);
     color: var(--text-primary);
     line-height: 1.5;
@@ -90,54 +94,26 @@ body {
 .logo {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 16px;
+    justify-content: center;
+    padding: 8px;
 }
 
 .logo-icon {
-    width: 40px;
-    height: 40px;
-}
-
-.logo-text {
-    font-size: 1.5rem;
-    font-weight: 700;
-    background: var(--accent-gradient);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-}
-
-.server-status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background: var(--bg-tertiary);
-    border-radius: var(--border-radius-md);
-    font-size: 0.85rem;
-}
-
-.status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--error);
-}
-
-.status-dot.online {
-    background: var(--success);
-    box-shadow: 0 0 8px var(--success);
-    animation: pulse 2s infinite;
-}
-
-.status-dot.offline {
-    background: var(--error);
+    width: 100%;
+    height: auto;
+    max-width: 200px;
+    display: block;
+    filter: drop-shadow(0 0 10px rgba(0, 212, 255, 0.4));
 }
 
 @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
 }
 
 /* ===== Navigation ===== */
@@ -207,7 +183,7 @@ body {
 
 .info-value {
     color: var(--text-secondary);
-    font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+    font-family: "SF Mono", "Monaco", "Consolas", monospace;
 }
 
 /* ===== Main Content ===== */
@@ -299,7 +275,9 @@ body {
 }
 
 @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 /* ===== Toast Container ===== */
@@ -325,10 +303,18 @@ body {
     max-width: 400px;
 }
 
-.toast.success { border-left: 4px solid var(--success); }
-.toast.error { border-left: 4px solid var(--error); }
-.toast.warning { border-left: 4px solid var(--warning); }
-.toast.info { border-left: 4px solid var(--info); }
+.toast.success {
+    border-left: 4px solid var(--success);
+}
+.toast.error {
+    border-left: 4px solid var(--error);
+}
+.toast.warning {
+    border-left: 4px solid var(--warning);
+}
+.toast.info {
+    border-left: 4px solid var(--info);
+}
 
 @keyframes slideIn {
     from {

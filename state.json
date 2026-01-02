@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "last_modified": "2026-01-03T01:12:36.034043+05:30",
+  "mounts": {
+    "/fallback": {
+      "Name": "/fallback",
+      "Password": "hackme",
+      "MaxListeners": 100,
+      "FallbackMount": "",
+      "Genre": "",
+      "Description": "Playing when main stream is offline",
+      "URL": "",
+      "Bitrate": 128,
+      "Type": "audio/mpeg",
+      "Public": false,
+      "StreamName": "Fallback Stream",
+      "Hidden": true,
+      "BurstSize": 65535,
+      "AllowedIPs": null,
+      "DeniedIPs": null,
+      "DumpFile": "",
+      "MaxListenerDuration": 0
+    },
+    "/live": {
+      "Name": "/live",
+      "Password": "",
+      "MaxListeners": 100,
+      "FallbackMount": "",
+      "Genre": "Various",
+      "Description": "Live broadcast stream",
+      "URL": "http://example.com",
+      "Bitrate": 320,
+      "Type": "audio/mpeg",
+      "Public": true,
+      "StreamName": "Live Stream",
+      "Hidden": false,
+      "BurstSize": 65535,
+      "AllowedIPs": null,
+      "DeniedIPs": null,
+      "DumpFile": "",
+      "MaxListenerDuration": 0
+    },
+    "/radio": {
+      "Name": "/radio",
+      "Password": "hackme",
+      "MaxListeners": 50,
+      "FallbackMount": "",
+      "Genre": "Music",
+      "Description": "24/7 Radio",
+      "URL": "",
+      "Bitrate": 192,
+      "Type": "audio/mpeg",
+      "Public": true,
+      "StreamName": "Radio Station",
+      "Hidden": false,
+      "BurstSize": 65535,
+      "AllowedIPs": null,
+      "DeniedIPs": null,
+      "DumpFile": "",
+      "MaxListenerDuration": 0
+    }
+  }
+}

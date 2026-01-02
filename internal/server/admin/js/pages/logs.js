@@ -1,6 +1,6 @@
 /**
  * GoCast Admin - Logs Page
- * Real-time activity log viewer
+ * Real-time server log viewer (stdout/stderr from server)
  */
 
 const LogsPage = {
@@ -8,7 +8,7 @@ const LogsPage = {
   _logs: [],
 
   // Max log entries to keep
-  _maxLogs: 500,
+  _maxLogs: 1000,
 
   // Current filter
   _filter: "all",
@@ -16,8 +16,8 @@ const LogsPage = {
   // Auto-scroll enabled
   _autoScroll: true,
 
-  // Update interval
-  _interval: null,
+  // Last log ID received
+  _lastLogId: 0,
 
   /**
    * Render the logs page
@@ -28,12 +28,11 @@ const LogsPage = {
                 <div class="flex gap-2 items-center">
                     <label class="form-label" style="margin: 0;">Filter:</label>
                     <select id="logFilter" class="form-select" style="width: 160px;" onchange="LogsPage.setFilter(this.value)">
-                        <option value="all">All Events</option>
-                        <option value="connect">Connections</option>
-                        <option value="disconnect">Disconnections</option>
-                        <option value="source">Sources</option>
-                        <option value="config">Config Changes</option>
+                        <option value="all">All Logs</option>
+                        <option value="info">Info</option>
+                        <option value="warn">Warnings</option>
                         <option value="error">Errors</option>
+                        <option value="debug">Debug</option>
                     </select>
 
                     <label class="form-checkbox" style="margin-left: 16px;">
@@ -75,99 +74,106 @@ const LogsPage = {
     this._logs = [];
     this._filter = "all";
     this._autoScroll = true;
+    this._lastLogId = 0;
 
-    // Subscribe to real-time events
-    API.on("listener", (data) => this.handleListenerEvent(data));
-    API.on("source", (data) => this.handleSourceEvent(data));
-    API.on("config", (data) => this.handleConfigEvent(data));
-    API.on("message", (data) => this.handleGenericEvent(data));
+    // Subscribe to real-time log events from server
+    API.on("log", (data) => this.handleLogEvent(data));
+    API.on("log_history", (data) => this.handleLogHistory(data));
 
-    // Add initial log entry
-    this.addLog("info", "Log viewer started");
+    // Load initial logs from server
+    await this.loadServerLogs();
 
-    // Start polling for status updates
-    this._interval = setInterval(() => this.pollStatus(), 5000);
+    // Add initial entry
+    this.addLog("info", "server", "Log viewer connected");
   },
 
   /**
    * Clean up when leaving page
    */
   destroy() {
-    if (this._interval) {
-      clearInterval(this._interval);
-      this._interval = null;
-    }
+    // Nothing to clean up
   },
 
   /**
-   * Poll status for changes
+   * Load logs from server API
    */
-  async pollStatus() {
+  async loadServerLogs() {
     try {
-      const status = await API.getStatus();
-      // We could compare with previous status and log changes
-      // For now, we just rely on SSE events
+      const response = await API.get("/logs?count=200");
+      if (response.success && response.data) {
+        // Add entries (they come in chronological order, oldest first after GetRecent)
+        response.data.forEach((entry) => {
+          this.addLogFromServer(entry);
+        });
+      }
     } catch (err) {
-      this.addLog("error", "Failed to poll status: " + err.message);
+      console.error("Failed to load logs:", err);
+      this.addLog(
+        "error",
+        "logs",
+        "Failed to load server logs: " + err.message,
+      );
     }
   },
 
   /**
-   * Handle listener event
+   * Handle log event from SSE
    */
-  handleListenerEvent(data) {
-    const action = data.action || "connected";
-    const mount = data.mount || "unknown";
-    const ip = data.ip || "";
-
-    const type = action === "disconnected" ? "disconnect" : "connect";
-    const message = ip
-      ? `Listener ${action} on ${mount} from ${ip}`
-      : `Listener ${action} on ${mount}`;
-
-    this.addLog(type, message, data);
+  handleLogEvent(data) {
+    this.addLogFromServer(data);
   },
 
   /**
-   * Handle source event
+   * Handle log history from SSE on connect
    */
-  handleSourceEvent(data) {
-    const action = data.action || "started";
-    const mount = data.mount || "unknown";
-    const message = `Source ${action} on ${mount}`;
-
-    this.addLog("source", message, data);
-  },
-
-  /**
-   * Handle config event
-   */
-  handleConfigEvent(data) {
-    const section = data.section || "unknown";
-    const message = `Configuration updated: ${section}`;
-
-    this.addLog("config", message, data);
-  },
-
-  /**
-   * Handle generic SSE event
-   */
-  handleGenericEvent(data) {
-    if (data.type && !["listener", "source", "config", "stats"].includes(data.type)) {
-      this.addLog("info", data.message || JSON.stringify(data), data);
+  handleLogHistory(data) {
+    if (data.entries && Array.isArray(data.entries)) {
+      data.entries.forEach((entry) => {
+        this.addLogFromServer(entry);
+      });
     }
   },
 
   /**
-   * Add a log entry
+   * Add log entry from server data
    */
-  addLog(type, message, data = null) {
+  addLogFromServer(entry) {
+    // Skip if we've already seen this log
+    if (entry.id && entry.id <= this._lastLogId) {
+      return;
+    }
+    if (entry.id) {
+      this._lastLogId = entry.id;
+    }
+
+    const logEntry = {
+      id: entry.id || Date.now() + Math.random(),
+      time: entry.timestamp ? new Date(entry.timestamp) : new Date(),
+      type: entry.level || "info",
+      source: entry.source || "server",
+      message: entry.message || "",
+    };
+
+    this._logs.unshift(logEntry);
+
+    // Trim to max size
+    if (this._logs.length > this._maxLogs) {
+      this._logs.length = this._maxLogs;
+    }
+
+    this.renderLogs();
+  },
+
+  /**
+   * Add a log entry (for local logs like "Log viewer connected")
+   */
+  addLog(type, source, message) {
     const entry = {
       id: Date.now() + Math.random(),
       time: new Date(),
       type: type,
+      source: source,
       message: message,
-      data: data,
     };
 
     this._logs.unshift(entry);
@@ -247,21 +253,17 @@ const LogsPage = {
    */
   renderLogEntry(log) {
     const typeColors = {
-      connect: "var(--success)",
-      disconnect: "var(--error)",
-      source: "var(--info)",
-      config: "var(--warning)",
+      debug: "var(--text-muted)",
+      info: "var(--info)",
+      warn: "var(--warning)",
       error: "var(--error)",
-      info: "var(--text-muted)",
     };
 
     const typeIcons = {
-      connect: "🟢",
-      disconnect: "🔴",
-      source: "📡",
-      config: "⚙️",
-      error: "⚠️",
+      debug: "🔍",
       info: "ℹ️",
+      warn: "⚠️",
+      error: "❌",
     };
 
     const time = log.time.toLocaleTimeString();
@@ -277,8 +279,11 @@ const LogsPage = {
                 <span style="min-width: 30px; display: inline-block; text-align: center;">
                     ${icon}
                 </span>
-                <span class="log-type" style="color: ${color}; min-width: 80px; display: inline-block; text-transform: uppercase; font-size: 0.75rem; font-weight: 600;">
+                <span class="log-type" style="color: ${color}; min-width: 60px; display: inline-block; text-transform: uppercase; font-size: 0.75rem; font-weight: 600;">
                     ${log.type}
+                </span>
+                <span class="log-source" style="color: var(--accent-primary); min-width: 80px; display: inline-block; font-size: 0.75rem;">
+                    [${UI.escapeHtml(log.source)}]
                 </span>
                 <span class="log-message" style="color: var(--text-primary);">
                     ${UI.escapeHtml(log.message)}
@@ -297,7 +302,7 @@ const LogsPage = {
         title: "Clear Logs",
         confirmText: "Clear",
         danger: true,
-      }
+      },
     );
 
     if (confirmed) {

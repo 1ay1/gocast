@@ -200,6 +200,17 @@ const ListenersPage = {
       return response.map((l) => ({ ...l, mount: mountPath }));
     }
 
+    // If it's an object with listeners property (new JSON format)
+    if (response && response.listeners && Array.isArray(response.listeners)) {
+      return response.listeners.map((l) => ({
+        id: l.id,
+        ip: l.ip,
+        userAgent: l.user_agent,
+        connected: String(l.connected),
+        mount: mountPath,
+      }));
+    }
+
     // If it's an object with data property
     if (response && response.data && Array.isArray(response.data)) {
       return response.data.map((l) => ({ ...l, mount: mountPath }));
@@ -274,7 +285,7 @@ const ListenersPage = {
     if (listeners.length > 0) {
       const totalSeconds = listeners.reduce(
         (sum, l) => sum + (parseInt(l.connected) || 0),
-        0
+        0,
       );
       const avgSeconds = Math.floor(totalSeconds / listeners.length);
       const avgTimeEl = UI.$("avgListenTime");
@@ -317,7 +328,7 @@ const ListenersPage = {
 
     // Sort by connected time (longest first)
     listeners.sort(
-      (a, b) => (parseInt(b.connected) || 0) - (parseInt(a.connected) || 0)
+      (a, b) => (parseInt(b.connected) || 0) - (parseInt(a.connected) || 0),
     );
 
     container.innerHTML = `
@@ -377,7 +388,7 @@ const ListenersPage = {
         title: "Kick Listener",
         confirmText: "Kick",
         danger: true,
-      }
+      },
     );
 
     if (confirmed) {

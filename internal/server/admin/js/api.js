@@ -213,7 +213,25 @@ const API = {
    */
   async listClients(mountPath) {
     const encodedPath = encodeURIComponent(mountPath);
-    return this.get(`/listclients?mount=${encodedPath}`);
+    const url = `${this.adminPath}/listclients?mount=${encodedPath}`;
+
+    try {
+      const response = await fetch(url, {
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to list clients");
+      }
+
+      return await response.json();
+    } catch (err) {
+      console.error("listClients error:", err);
+      throw err;
+    }
   },
 
   /**
@@ -316,7 +334,17 @@ const API = {
       };
 
       // Handle specific event types
-      ["stats", "listener", "source", "metadata", "config"].forEach((type) => {
+      [
+        "stats",
+        "listener",
+        "source",
+        "metadata",
+        "config",
+        "activity",
+        "log",
+        "activity_history",
+        "log_history",
+      ].forEach((type) => {
         this.eventSource.addEventListener(type, (event) => {
           try {
             const data = JSON.parse(event.data);

@@ -101,6 +101,11 @@ const App = {
       // Try to connect SSE for real-time updates
       try {
         await API.connectSSE();
+
+        // Subscribe to SSE stats events to keep state updated
+        API.on("stats", (data) => {
+          State.updateFromStatus(data);
+        });
       } catch (err) {
         console.warn("SSE not available, falling back to polling:", err);
         API.startPolling(3000);
@@ -169,10 +174,27 @@ const App = {
       }
 
       // Number keys to switch pages (1-6)
-      if (e.key >= "1" && e.key <= "6" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (
+        e.key >= "1" &&
+        e.key <= "6" &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey
+      ) {
         const target = e.target;
-        if (target.tagName !== "INPUT" && target.tagName !== "TEXTAREA" && target.tagName !== "SELECT") {
-          const pages = ["dashboard", "streams", "mounts", "listeners", "settings", "logs"];
+        if (
+          target.tagName !== "INPUT" &&
+          target.tagName !== "TEXTAREA" &&
+          target.tagName !== "SELECT"
+        ) {
+          const pages = [
+            "dashboard",
+            "streams",
+            "mounts",
+            "listeners",
+            "settings",
+            "logs",
+          ];
           const index = parseInt(e.key) - 1;
           if (pages[index]) {
             this.navigateTo(pages[index]);
@@ -293,28 +315,38 @@ const App = {
    * Start uptime ticker
    */
   startUptimeTicker() {
-    const updateUptime = () => {
+    const updateDisplay = () => {
+      const uptimeStr = State.getUptimeString();
+
+      // Update sidebar uptime
       const uptimeEl = UI.$("uptime");
       if (uptimeEl) {
-        uptimeEl.textContent = State.getUptimeString();
+        uptimeEl.textContent = uptimeStr;
       }
 
-      // Also update sidebar uptime if present
-      const sidebarUptime = document.querySelector(".sidebar-footer #uptime");
-      if (sidebarUptime) {
-        sidebarUptime.textContent = State.getUptimeString();
+      // Update dashboard uptime
+      const serverUptimeEl = UI.$("serverUptime");
+      if (serverUptimeEl) {
+        serverUptimeEl.textContent = uptimeStr;
+      }
+
+      // Update version in sidebar
+      const versionEl = UI.$("version");
+      if (versionEl) {
+        const version = State.get("server.version");
+        versionEl.textContent = version || "dev";
       }
     };
 
     // Update immediately and then every second
-    updateUptime();
-    setInterval(updateUptime, 1000);
+    updateDisplay();
+    setInterval(updateDisplay, 1000);
 
-    // Also update version
+    // Also subscribe to version changes for immediate updates
     State.subscribe("server.version", (version) => {
       const versionEl = UI.$("version");
       if (versionEl) {
-        versionEl.textContent = version || "--";
+        versionEl.textContent = version || "dev";
       }
     });
   },
