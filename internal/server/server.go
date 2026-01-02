@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	_ "embed"
 	"fmt"
 	"log"
 	"net"
@@ -16,6 +17,9 @@ import (
 	"github.com/gocast/gocast/internal/source"
 	"github.com/gocast/gocast/internal/stream"
 )
+
+//go:embed admin_panel.html
+var adminPanelHTML string
 
 // Server is the main GoCast HTTP server
 type Server struct {
@@ -260,8 +264,11 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	case path == "/admin/listmounts":
 		s.handleAdminListMounts(w, r)
 
-	case path == "/admin/":
+	case path == "/admin/", path == "/admin":
 		s.handleAdminIndex(w, r)
+
+	case path == "/admin/panel":
+		s.handleModernAdminPanel(w, r)
 
 	default:
 		http.NotFound(w, r)
@@ -408,8 +415,20 @@ func (s *Server) handleAdminListMounts(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "</icestats>")
 }
 
-// handleAdminIndex shows admin index page
+// handleModernAdminPanel serves the modern admin panel
+func (s *Server) handleModernAdminPanel(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(adminPanelHTML))
+}
+
+// handleAdminIndex serves the modern admin panel
 func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(adminPanelHTML))
+}
+
+// handleAdminIndexOld shows old admin index page (kept for reference)
+func (s *Server) handleAdminIndexOld(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	fmt.Fprint(w, `<!DOCTYPE html>
