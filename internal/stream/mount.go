@@ -282,6 +282,74 @@ func (m *Mount) GetListeners() []*Listener {
 	return result
 }
 
+// UniqueListener represents a consolidated view of listeners from the same IP/UserAgent
+type UniqueListener struct {
+	IP          string
+	UserAgent   string
+	Connections int
+	ConnectedAt time.Time // Earliest connection time
+	BytesSent   int64     // Total bytes across all connections
+	LastActive  time.Time // Most recent activity
+	IDs         []string  // All listener IDs for this unique listener
+}
+
+// GetUniqueListeners returns listeners consolidated by IP+UserAgent
+// This is useful for display purposes since browsers (especially Safari)
+// often create multiple connections for a single user
+func (m *Mount) GetUniqueListeners() []*UniqueListener {
+	m.listenerMu.RLock()
+	defer m.listenerMu.RUnlock()
+
+	// Key: IP + "|" + UserAgent
+	unique := make(map[string]*UniqueListener)
+
+	for _, l := range m.listeners {
+		key := l.IP + "|" + l.UserAgent
+		if ul, exists := unique[key]; exists {
+			// Consolidate with existing
+			ul.Connections++
+			ul.BytesSent += l.BytesSent
+			ul.IDs = append(ul.IDs, l.ID)
+			if l.ConnectedAt.Before(ul.ConnectedAt) {
+				ul.ConnectedAt = l.ConnectedAt
+			}
+			if l.LastActive.After(ul.LastActive) {
+				ul.LastActive = l.LastActive
+			}
+		} else {
+			// New unique listener
+			unique[key] = &UniqueListener{
+				IP:          l.IP,
+				UserAgent:   l.UserAgent,
+				Connections: 1,
+				ConnectedAt: l.ConnectedAt,
+				BytesSent:   l.BytesSent,
+				LastActive:  l.LastActive,
+				IDs:         []string{l.ID},
+			}
+		}
+	}
+
+	result := make([]*UniqueListener, 0, len(unique))
+	for _, ul := range unique {
+		result = append(result, ul)
+	}
+	return result
+}
+
+// UniqueListenerCount returns the count of unique IP+UserAgent combinations
+func (m *Mount) UniqueListenerCount() int {
+	m.listenerMu.RLock()
+	defer m.listenerMu.RUnlock()
+
+	unique := make(map[string]struct{})
+	for _, l := range m.listeners {
+		key := l.IP + "|" + l.UserAgent
+		unique[key] = struct{}{}
+	}
+	return len(unique)
+}
+
 // GetMetadata returns the current metadata
 func (m *Mount) GetMetadata() *Metadata {
 	return m.metadata.Clone()
@@ -343,29 +411,31 @@ func (m *Mount) Stats() MountStats {
 	defer m.mu.RUnlock()
 
 	return MountStats{
-		Path:          m.Path,
-		Active:        m.sourceActive,
-		SourceIP:      m.sourceIP,
-		StartTime:     m.startTime,
-		BytesReceived: atomic.LoadInt64(&m.bytesReceived),
-		Listeners:     m.ListenerCount(),
-		PeakListeners: m.PeakListeners(),
-		ContentType:   m.metadata.ContentType,
-		Metadata:      m.metadata.Clone(),
+		Path:             m.Path,
+		Active:           m.sourceActive,
+		SourceIP:         m.sourceIP,
+		StartTime:        m.startTime,
+		BytesReceived:    atomic.LoadInt64(&m.bytesReceived),
+		Listeners:        m.UniqueListenerCount(), // Use unique count for display
+		TotalConnections: m.ListenerCount(),       // Raw connection count
+		PeakListeners:    m.PeakListeners(),
+		ContentType:      m.metadata.ContentType,
+		Metadata:         m.metadata.Clone(),
 	}
 }
 
 // MountStats contains mount point statistics
 type MountStats struct {
-	Path          string
-	Active        bool
-	SourceIP      string
-	StartTime     time.Time
-	BytesReceived int64
-	Listeners     int
-	PeakListeners int
-	ContentType   string
-	Metadata      *Metadata
+	Path             string
+	Active           bool
+	SourceIP         string
+	StartTime        time.Time
+	BytesReceived    int64
+	Listeners        int // Unique listeners (by IP+UserAgent)
+	TotalConnections int // Raw TCP connection count
+	PeakListeners    int
+	ContentType      string
+	Metadata         *Metadata
 }
 
 // MountManager manages all mount points

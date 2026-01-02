@@ -352,10 +352,11 @@ const DashboardPage = {
     try {
       const response = await API.get("/activity?count=20");
       if (response.success && response.data) {
-        // Add entries in reverse order (oldest first)
-        const entries = response.data.reverse();
+        // Sort by ID ascending (oldest first), then append each
+        // This puts oldest at bottom, newest at top
+        const entries = response.data.sort((a, b) => a.id - b.id);
         entries.forEach((entry) => {
-          this.addActivityFromServer(entry);
+          this.addActivityFromServer(entry, true);
         });
       }
     } catch (err) {
@@ -380,19 +381,23 @@ const DashboardPage = {
       if (container) {
         container.innerHTML = "";
       }
-      data.entries.forEach((entry) => {
-        this.addActivityFromServer(entry);
+      // Sort by ID ascending (oldest first), prepend each so newest ends up on top
+      const sorted = data.entries.sort((a, b) => a.id - b.id);
+      sorted.forEach((entry) => {
+        this.addActivityFromServer(entry, true);
       });
     }
   },
 
   /**
    * Add activity entry from server data
+   * @param {boolean} prepend - if true, add to top; if false, add to bottom
    */
-  addActivityFromServer(entry) {
+  addActivityFromServer(entry, prepend = true) {
     const typeMap = {
       listener_connect: "connect",
       listener_disconnect: "disconnect",
+      listener_summary: "info",
       source_start: "source",
       source_stop: "source",
       config_change: "config",
@@ -406,7 +411,7 @@ const DashboardPage = {
     const type = typeMap[entry.type] || "info";
     const time = entry.timestamp ? new Date(entry.timestamp) : new Date();
 
-    this.addActivity(type, entry.message, time);
+    this.addActivity(type, entry.message, time, prepend);
   },
 
   /**
@@ -439,8 +444,9 @@ const DashboardPage = {
 
   /**
    * Add activity entry
+   * @param {boolean} prepend - if true, add to top; if false, add to bottom
    */
-  addActivity(type, message, time = null) {
+  addActivity(type, message, time = null, prepend = true) {
     const container = UI.$("activityList");
     if (!container) return;
 
@@ -469,7 +475,11 @@ const DashboardPage = {
             <span class="log-message">${UI.escapeHtml(message)}</span>
         `;
 
-    container.insertBefore(entry, container.firstChild);
+    if (prepend) {
+      container.insertBefore(entry, container.firstChild);
+    } else {
+      container.appendChild(entry);
+    }
 
     // Keep only last 50 entries
     while (container.children.length > 50) {

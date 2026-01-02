@@ -85,6 +85,15 @@ func main() {
 		// Create a multi-writer that writes to both stdout and the log buffer
 		multiWriter := io.MultiWriter(os.Stdout, logWriter)
 		logger.SetOutput(multiWriter)
+
+		// Also capture stderr
+		stderrWriter := srv.GetLogWriter("stderr")
+		if stderrWriter != nil {
+			stderrMulti := io.MultiWriter(os.Stderr, stderrWriter)
+			// Redirect Go's default log (which some packages use) to also capture
+			log.SetOutput(stderrMulti)
+		}
+
 		logger.Println("Log capture enabled for admin panel")
 	}
 
@@ -123,8 +132,8 @@ func main() {
 		case syscall.SIGINT, syscall.SIGTERM:
 			logger.Printf("Received %v, shutting down...", sig)
 
-			// Create shutdown context with timeout
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// Create shutdown context with timeout (short since server closes connections proactively)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
 			if err := srv.Stop(ctx); err != nil {

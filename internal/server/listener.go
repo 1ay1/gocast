@@ -89,6 +89,12 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle HEAD requests separately - just return headers, no listener creation
+	if r.Method == http.MethodHead {
+		h.HandleHead(w, r, mount)
+		return
+	}
+
 	// Check if we can add listener
 	if !mount.CanAddListener() {
 		http.Error(w, "Listener limit reached", http.StatusServiceUnavailable)
@@ -138,6 +144,37 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.streamToClient(w, flusher, hasFlusher, listener, mount, metadataInterval)
 }
 
+// HandleHead handles HEAD requests - returns headers without creating a listener
+// Browsers often send HEAD requests to probe the stream before connecting
+func (h *ListenerHandler) HandleHead(w http.ResponseWriter, r *http.Request, mount *stream.Mount) {
+	meta := mount.GetMetadata()
+
+	w.Header().Set("Content-Type", meta.ContentType)
+	w.Header().Set("Connection", "close")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Server", "GoCast/"+Version)
+
+	// ICY headers
+	if meta.Name != "" {
+		w.Header().Set("icy-name", meta.Name)
+	}
+	if meta.Genre != "" {
+		w.Header().Set("icy-genre", meta.Genre)
+	}
+	if meta.Bitrate > 0 {
+		w.Header().Set("icy-br", strconv.Itoa(meta.Bitrate))
+	}
+	w.Header().Set("icy-pub", "1")
+
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Origin, Accept, X-Requested-With, Content-Type, Icy-MetaData")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+
+	w.WriteHeader(http.StatusOK)
+}
+
 // setHeaders sets HTTP response headers for streaming
 func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount, metaInterval int) {
 	meta := mount.GetMetadata()
@@ -166,7 +203,7 @@ func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount,
 	// CORS
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Origin, Accept, X-Requested-With, Content-Type, Icy-MetaData")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -497,7 +534,7 @@ func getClientIP(r *http.Request) string {
 // HandleOptions handles CORS preflight requests
 func (h *ListenerHandler) HandleOptions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Origin, Accept, X-Requested-With, Content-Type, Icy-MetaData")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 	w.WriteHeader(http.StatusNoContent)

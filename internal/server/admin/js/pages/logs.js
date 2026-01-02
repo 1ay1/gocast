@@ -4,7 +4,7 @@
  */
 
 const LogsPage = {
-  // Log entries
+  // Log entries (stored newest first)
   _logs: [],
 
   // Max log entries to keep
@@ -16,8 +16,11 @@ const LogsPage = {
   // Auto-scroll enabled
   _autoScroll: true,
 
-  // Last log ID received
-  _lastLogId: 0,
+  // Set of log IDs we've seen (for deduplication)
+  _seenIds: new Set(),
+
+  // Loading state
+  _loading: false,
 
   /**
    * Render the logs page
@@ -74,7 +77,8 @@ const LogsPage = {
     this._logs = [];
     this._filter = "all";
     this._autoScroll = true;
-    this._lastLogId = 0;
+    this._seenIds = new Set();
+    this._loading = true;
 
     // Subscribe to real-time log events from server
     API.on("log", (data) => this.handleLogEvent(data));
@@ -83,8 +87,7 @@ const LogsPage = {
     // Load initial logs from server
     await this.loadServerLogs();
 
-    // Add initial entry
-    this.addLog("info", "server", "Log viewer connected");
+    this._loading = false;
   },
 
   /**
@@ -99,20 +102,17 @@ const LogsPage = {
    */
   async loadServerLogs() {
     try {
-      const response = await API.get("/logs?count=200");
-      if (response.success && response.data) {
-        // Add entries (they come in chronological order, oldest first after GetRecent)
-        response.data.forEach((entry) => {
-          this.addLogFromServer(entry);
+      const response = await API.get("/logs?count=500");
+      if (response.success && response.data && response.data.length > 0) {
+        // Sort by ID ascending (oldest first), then add each
+        const sorted = response.data.sort((a, b) => a.id - b.id);
+        sorted.forEach((entry) => {
+          this.addLogFromServer(entry, false); // Don't re-render each time
         });
+        this.renderLogs(); // Render once at the end
       }
     } catch (err) {
       console.error("Failed to load logs:", err);
-      this.addLog(
-        "error",
-        "logs",
-        "Failed to load server logs: " + err.message,
-      );
     }
   },
 
@@ -128,48 +128,69 @@ const LogsPage = {
    */
   handleLogHistory(data) {
     if (data.entries && Array.isArray(data.entries)) {
-      data.entries.forEach((entry) => {
-        this.addLogFromServer(entry);
+      // Sort by ID ascending (oldest first)
+      const sorted = data.entries.sort((a, b) => a.id - b.id);
+      let added = false;
+      sorted.forEach((entry) => {
+        if (this.addLogFromServer(entry, false)) {
+          added = true;
+        }
       });
+      if (added) {
+        this.renderLogs();
+      }
     }
   },
 
   /**
    * Add log entry from server data
+   * @param {Object} entry - The log entry from server
+   * @param {boolean} render - Whether to re-render after adding
+   * @returns {boolean} - Whether the entry was added (false if duplicate)
    */
-  addLogFromServer(entry) {
-    // Skip if we've already seen this log
-    if (entry.id && entry.id <= this._lastLogId) {
-      return;
+  addLogFromServer(entry, render = true) {
+    // Skip if we've already seen this log ID
+    const id = entry.id || 0;
+    if (id && this._seenIds.has(id)) {
+      return false;
     }
-    if (entry.id) {
-      this._lastLogId = entry.id;
+    if (id) {
+      this._seenIds.add(id);
     }
 
     const logEntry = {
-      id: entry.id || Date.now() + Math.random(),
+      id: id || Date.now() + Math.random(),
       time: entry.timestamp ? new Date(entry.timestamp) : new Date(),
       type: entry.level || "info",
       source: entry.source || "server",
       message: entry.message || "",
     };
 
+    // Insert at beginning (newest first)
     this._logs.unshift(logEntry);
 
-    // Trim to max size
+    // Trim to max size and clean up seenIds for removed entries
     if (this._logs.length > this._maxLogs) {
-      this._logs.length = this._maxLogs;
+      const removed = this._logs.splice(this._maxLogs);
+      removed.forEach((r) => {
+        if (r.id) this._seenIds.delete(r.id);
+      });
     }
 
-    this.renderLogs();
+    if (render) {
+      this.renderLogs();
+    }
+
+    return true;
   },
 
   /**
-   * Add a log entry (for local logs like "Log viewer connected")
+   * Add a local log entry
    */
   addLog(type, source, message) {
+    const localId = Date.now() + Math.random();
     const entry = {
-      id: Date.now() + Math.random(),
+      id: localId,
       time: new Date(),
       type: type,
       source: source,
@@ -180,10 +201,9 @@ const LogsPage = {
 
     // Trim to max size
     if (this._logs.length > this._maxLogs) {
-      this._logs.length = this._maxLogs;
+      this._logs.pop();
     }
 
-    // Update display
     this.renderLogs();
   },
 
@@ -220,26 +240,32 @@ const LogsPage = {
     const container = UI.$("logsContainer");
     if (!container) return;
 
+    // Get filtered logs - already sorted newest first
     const logs = this.getFilteredLogs();
 
-    // Update badge
+    // Update badge with total count
     const badge = UI.$("logCountBadge");
     if (badge) {
-      badge.textContent = `${logs.length} entries`;
+      const total = this._logs.length;
+      const filtered = logs.length;
+      badge.textContent =
+        this._filter === "all"
+          ? `${total} entries`
+          : `${filtered} of ${total} entries`;
     }
 
     if (logs.length === 0) {
       container.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-icon">📋</div>
-                    <div class="empty-title">No Log Entries</div>
-                    <div class="empty-text">${this._filter === "all" ? "Activity will be logged here in real-time" : "No entries match the current filter"}</div>
+                    <div class="empty-title">${this._loading ? "Loading logs..." : "No Log Entries"}</div>
+                    <div class="empty-text">${this._filter === "all" ? "Server logs will appear here in real-time" : "No entries match the current filter"}</div>
                 </div>
             `;
       return;
     }
 
-    // Render log entries
+    // Render log entries (logs are already newest first)
     container.innerHTML = logs.map((log) => this.renderLogEntry(log)).join("");
 
     // Auto-scroll to top (newest entries)

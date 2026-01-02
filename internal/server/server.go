@@ -249,15 +249,43 @@ func (s *Server) startHTTPS(handler http.Handler) error {
 func (s *Server) Stop(ctx context.Context) error {
 	s.logger.Println("Shutting down GoCast server...")
 
+	// Stop activity buffer flush loop first
+	if s.activityBuffer != nil {
+		s.activityBuffer.Stop()
+	}
+
+	// Log server stop
+	if s.activityBuffer != nil {
+		s.activityBuffer.Add(ActivityServerStop, "GoCast server stopping", nil)
+	}
+
+	// Disconnect all listeners immediately so HTTP server can shutdown quickly
+	s.logger.Println("Disconnecting all listeners...")
+	mounts := s.mountManager.GetAllMounts()
+	for _, mount := range mounts {
+		listeners := mount.GetListeners()
+		for _, l := range listeners {
+			l.Close()
+		}
+		// Also stop any active sources
+		if mount.IsActive() {
+			mount.StopSource()
+		}
+	}
+
 	var wg sync.WaitGroup
 
-	// Shutdown HTTP server
+	// Shutdown HTTP server with a short timeout
 	if s.httpServer != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.httpServer.Shutdown(ctx); err != nil {
-				s.logger.Printf("HTTP server shutdown error: %v", err)
+			// Use a shorter context for HTTP shutdown since we already closed connections
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+				s.logger.Printf("HTTP server shutdown error: %v, forcing close", err)
+				s.httpServer.Close() // Force close if graceful shutdown fails
 			}
 		}()
 	}
@@ -267,8 +295,11 @@ func (s *Server) Stop(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.httpsServer.Shutdown(ctx); err != nil {
-				s.logger.Printf("HTTPS server shutdown error: %v", err)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := s.httpsServer.Shutdown(shutdownCtx); err != nil {
+				s.logger.Printf("HTTPS server shutdown error: %v, forcing close", err)
+				s.httpsServer.Close()
 			}
 		}()
 	}
@@ -285,6 +316,13 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.logger.Println("GoCast server stopped gracefully")
 		return nil
 	case <-ctx.Done():
+		// Force close if context times out
+		if s.httpServer != nil {
+			s.httpServer.Close()
+		}
+		if s.httpsServer != nil {
+			s.httpsServer.Close()
+		}
 		return ctx.Err()
 	}
 }
@@ -469,7 +507,8 @@ func (s *Server) handleAdminListClients(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	listeners := mount.GetListeners()
+	// Use unique listeners to consolidate multiple connections from same IP/UserAgent
+	uniqueListeners := mount.GetUniqueListeners()
 
 	// Check if JSON is requested
 	accept := r.Header.Get("Accept")
@@ -480,17 +519,21 @@ func (s *Server) handleAdminListClients(w http.ResponseWriter, r *http.Request) 
 		sb.WriteString(fmt.Sprintf("%q", mountPath))
 		sb.WriteString(`,"listeners":[`)
 
-		for i, listener := range listeners {
+		for i, listener := range uniqueListeners {
 			if i > 0 {
 				sb.WriteString(",")
 			}
 			connected := int(time.Since(listener.ConnectedAt).Seconds())
-			sb.WriteString(fmt.Sprintf(`{"id":%q,"ip":%q,"user_agent":%q,"connected":%d}`,
-				listener.ID, listener.IP, listener.UserAgent, connected))
+			// Use first ID as the primary, but include all IDs for kick functionality
+			primaryID := listener.IDs[0]
+			sb.WriteString(fmt.Sprintf(`{"id":%q,"ip":%q,"user_agent":%q,"connected":%d,"connections":%d,"ids":%s}`,
+				primaryID, listener.IP, listener.UserAgent, connected, listener.Connections, toJSONStringArray(listener.IDs)))
 		}
 
 		sb.WriteString(`],"total":`)
-		sb.WriteString(fmt.Sprintf("%d}", len(listeners)))
+		sb.WriteString(fmt.Sprintf("%d", len(uniqueListeners)))
+		sb.WriteString(`,"total_connections":`)
+		sb.WriteString(fmt.Sprintf("%d}", mount.ListenerCount()))
 		w.Write([]byte(sb.String()))
 		return
 	}
@@ -502,12 +545,13 @@ func (s *Server) handleAdminListClients(w http.ResponseWriter, r *http.Request) 
 	fmt.Fprint(w, "\n<icestats>")
 	fmt.Fprintf(w, "<source mount=\"%s\">", mountPath)
 
-	for _, listener := range listeners {
+	for _, listener := range uniqueListeners {
 		fmt.Fprint(w, "<listener>")
-		fmt.Fprintf(w, "<ID>%s</ID>", listener.ID)
+		fmt.Fprintf(w, "<ID>%s</ID>", listener.IDs[0])
 		fmt.Fprintf(w, "<IP>%s</IP>", listener.IP)
 		fmt.Fprintf(w, "<UserAgent>%s</UserAgent>", escapeXML(listener.UserAgent))
 		fmt.Fprintf(w, "<Connected>%d</Connected>", int(time.Since(listener.ConnectedAt).Seconds()))
+		fmt.Fprintf(w, "<Connections>%d</Connections>", listener.Connections)
 		fmt.Fprint(w, "</listener>")
 	}
 
@@ -531,10 +575,25 @@ func (s *Server) handleAdminMoveClients(w http.ResponseWriter, r *http.Request) 
 	fmt.Fprint(w, `<?xml version="1.0"?><iceresponse><message>Clients moved</message><return>1</return></iceresponse>`)
 }
 
-// handleAdminKillClient disconnects a specific client
+// toJSONStringArray converts a slice of strings to a JSON array string
+func toJSONStringArray(strs []string) string {
+	var sb strings.Builder
+	sb.WriteString("[")
+	for i, s := range strs {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(fmt.Sprintf("%q", s))
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// handleAdminKillClient disconnects a specific client (or all connections from same IP/UA)
 func (s *Server) handleAdminKillClient(w http.ResponseWriter, r *http.Request) {
 	mountPath := r.URL.Query().Get("mount")
 	clientID := r.URL.Query().Get("id")
+	killAll := r.URL.Query().Get("all") == "true" // If true, kill all connections from same IP/UA
 
 	if mountPath == "" || clientID == "" {
 		http.Error(w, "Missing mount or id parameter", http.StatusBadRequest)
@@ -547,7 +606,33 @@ func (s *Server) handleAdminKillClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mount.RemoveListenerByID(clientID)
+	killedCount := 0
+	if killAll {
+		// Find the listener first to get IP/UA, then kill all matching
+		listeners := mount.GetListeners()
+		var targetIP, targetUA string
+		for _, l := range listeners {
+			if l.ID == clientID {
+				targetIP = l.IP
+				targetUA = l.UserAgent
+				break
+			}
+		}
+		if targetIP != "" {
+			// Kill all connections from same IP/UA
+			for _, l := range listeners {
+				if l.IP == targetIP && l.UserAgent == targetUA {
+					mount.RemoveListenerByID(l.ID)
+					killedCount++
+				}
+			}
+		}
+	} else {
+		mount.RemoveListenerByID(clientID)
+		killedCount = 1
+	}
+
+	s.logger.Printf("Killed %d client connection(s) on %s", killedCount, mountPath)
 
 	w.Header().Set("Content-Type", "text/xml")
 	fmt.Fprint(w, `<?xml version="1.0"?><iceresponse><message>Client killed</message><return>1</return></iceresponse>`)

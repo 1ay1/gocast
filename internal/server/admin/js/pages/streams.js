@@ -14,10 +14,10 @@ const StreamsPage = {
     return `
             <div class="flex justify-between items-center mb-3">
                 <div class="flex gap-2">
-                    <button class="btn btn-secondary ${this._filter === 'all' ? 'active' : ''}" onclick="StreamsPage.setFilter('all')">
+                    <button class="btn btn-secondary ${this._filter === "all" ? "active" : ""}" onclick="StreamsPage.setFilter('all')">
                         All Streams
                     </button>
-                    <button class="btn btn-secondary ${this._filter === 'live' ? 'active' : ''}" onclick="StreamsPage.setFilter('live')">
+                    <button class="btn btn-secondary ${this._filter === "live" ? "active" : ""}" onclick="StreamsPage.setFilter('live')">
                         🔴 Live Only
                     </button>
                 </div>
@@ -104,11 +104,14 @@ const StreamsPage = {
       filtered = mounts.filter((m) => m.active);
     }
 
-    // Sort: active first, then by listeners
+    // Sort: active first, then by listeners, then by path (for stable ordering)
     filtered.sort((a, b) => {
       if (a.active && !b.active) return -1;
       if (!a.active && b.active) return 1;
-      return (b.listeners || 0) - (a.listeners || 0);
+      const listenerDiff = (b.listeners || 0) - (a.listeners || 0);
+      if (listenerDiff !== 0) return listenerDiff;
+      // Stable sort by path when everything else is equal
+      return (a.path || "").localeCompare(b.path || "");
     });
 
     if (filtered.length === 0) {
@@ -259,7 +262,7 @@ const StreamsPage = {
         title: "Stop Source",
         confirmText: "Stop Source",
         danger: true,
-      }
+      },
     );
 
     if (confirmed) {

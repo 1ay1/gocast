@@ -207,6 +207,8 @@ const ListenersPage = {
         ip: l.ip,
         userAgent: l.user_agent,
         connected: String(l.connected),
+        connections: l.connections || 1,
+        ids: l.ids || [l.id],
         mount: mountPath,
       }));
     }
@@ -363,14 +365,21 @@ const ListenersPage = {
     const shortUA =
       userAgent.length > 50 ? userAgent.substring(0, 50) + "..." : userAgent;
 
+    // Show connection count if more than 1
+    const connections = listener.connections || 1;
+    const connBadge =
+      connections > 1
+        ? `<span class="badge badge-neutral" title="${connections} browser connections">${connections}x</span>`
+        : "";
+
     return `
             <tr>
-                <td class="mono">${UI.escapeHtml(listener.ip || "Unknown")}</td>
+                <td class="mono">${UI.escapeHtml(listener.ip || "Unknown")} ${connBadge}</td>
                 <td class="mono">${UI.escapeHtml(listener.mount)}</td>
                 <td title="${UI.escapeHtml(userAgent)}">${UI.escapeHtml(shortUA)}</td>
                 <td>${duration}</td>
                 <td>
-                    <button class="btn btn-sm btn-danger" onclick="ListenersPage.kickListener('${listener.mount}', '${listener.id}')" title="Kick listener">
+                    <button class="btn btn-sm btn-danger" onclick="ListenersPage.kickListener('${listener.mount}', '${listener.id}')" title="Kick listener${connections > 1 ? ` (all ${connections} connections)` : ""}">
                         ⏏️ Kick
                     </button>
                 </td>

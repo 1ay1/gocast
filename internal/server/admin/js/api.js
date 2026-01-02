@@ -235,13 +235,16 @@ const API = {
   },
 
   /**
-   * Kill a specific client
+   * Kill a specific client (and all connections from same IP/UserAgent)
    */
-  async killClient(mountPath, clientId) {
+  async killClient(mountPath, clientId, killAll = true) {
     const params = new URLSearchParams({
       mount: mountPath,
       id: clientId,
     });
+    if (killAll) {
+      params.set("all", "true");
+    }
     return this.get(`/killclient?${params}`);
   },
 

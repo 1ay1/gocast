@@ -25,6 +25,7 @@ type LogEntry struct {
 	Level     LogLevel  `json:"level"`
 	Source    string    `json:"source"`
 	Message   string    `json:"message"`
+	Count     int       `json:"count,omitempty"` // For aggregated entries
 }
 
 // LogBuffer is a circular buffer that stores log entries and broadcasts to subscribers
@@ -35,6 +36,13 @@ type LogBuffer struct {
 	mu          sync.RWMutex
 	subscribers map[chan LogEntry]struct{}
 	subMu       sync.RWMutex
+
+	// Rate limiting for repeated messages
+	lastMessage string
+	lastSource  string
+	lastTime    time.Time
+	repeatCount int
+	rateLimitMs int64 // Minimum ms between identical messages
 }
 
 // NewLogBuffer creates a new log buffer with the specified max size
@@ -47,21 +55,59 @@ func NewLogBuffer(maxSize int) *LogBuffer {
 		maxSize:     maxSize,
 		nextID:      1,
 		subscribers: make(map[chan LogEntry]struct{}),
+		rateLimitMs: 1000, // 1 second between identical messages
 	}
 }
 
-// Add adds a new log entry to the buffer
+// Add adds a new log entry to the buffer with rate limiting
 func (lb *LogBuffer) Add(level LogLevel, source, message string) {
 	lb.mu.Lock()
 
+	message = strings.TrimSpace(message)
+	now := time.Now()
+
+	// Check for repeated messages (rate limiting)
+	if message == lb.lastMessage && source == lb.lastSource {
+		elapsed := now.Sub(lb.lastTime).Milliseconds()
+		if elapsed < lb.rateLimitMs {
+			// Same message within rate limit window - just count it
+			lb.repeatCount++
+			lb.mu.Unlock()
+			return
+		}
+	}
+
+	// If we had repeated messages, log the count first
+	if lb.repeatCount > 0 {
+		repeatEntry := LogEntry{
+			ID:        lb.nextID,
+			Timestamp: now,
+			Level:     LogLevelInfo,
+			Source:    lb.lastSource,
+			Message:   fmt.Sprintf("(previous message repeated %d times)", lb.repeatCount),
+			Count:     lb.repeatCount,
+		}
+		lb.nextID++
+		if len(lb.entries) >= lb.maxSize {
+			lb.entries = lb.entries[1:]
+		}
+		lb.entries = append(lb.entries, repeatEntry)
+		lb.repeatCount = 0
+	}
+
 	entry := LogEntry{
 		ID:        lb.nextID,
-		Timestamp: time.Now(),
+		Timestamp: now,
 		Level:     level,
 		Source:    source,
-		Message:   strings.TrimSpace(message),
+		Message:   message,
 	}
 	lb.nextID++
+
+	// Update last message tracking
+	lb.lastMessage = message
+	lb.lastSource = source
+	lb.lastTime = now
 
 	// Add to buffer, removing oldest if at capacity
 	if len(lb.entries) >= lb.maxSize {
@@ -142,6 +188,9 @@ func (lb *LogBuffer) Clear() {
 	defer lb.mu.Unlock()
 
 	lb.entries = lb.entries[:0]
+	lb.repeatCount = 0
+	lb.lastMessage = ""
+	lb.lastSource = ""
 }
 
 // Subscribe returns a channel that receives new log entries
@@ -211,17 +260,10 @@ func (lw *LogWriter) Write(p []byte) (n int, err error) {
 			// Complete line, send to buffer
 			line := lw.lineBuf.String()
 			if line != "" {
-				// Try to parse log level from the line
-				level := lw.level
-				if strings.Contains(line, "ERROR") || strings.Contains(line, "error:") {
-					level = LogLevelError
-				} else if strings.Contains(line, "WARN") || strings.Contains(line, "warning:") {
-					level = LogLevelWarn
-				} else if strings.Contains(line, "DEBUG") {
-					level = LogLevelDebug
+				level, source, message := lw.parseLine(line)
+				if message != "" {
+					lw.buffer.Add(level, source, message)
 				}
-
-				lw.buffer.Add(level, lw.source, line)
 			}
 			lw.lineBuf.Reset()
 		} else {
@@ -230,6 +272,40 @@ func (lw *LogWriter) Write(p []byte) (n int, err error) {
 	}
 
 	return n, nil
+}
+
+// parseLine extracts level, source, and message from a log line
+// It handles Go's standard log format: "2006/01/02 15:04:05 [Source] message"
+func (lw *LogWriter) parseLine(line string) (LogLevel, string, string) {
+	level := lw.level
+	source := lw.source
+	message := line
+
+	// Try to strip Go log timestamp prefix (e.g., "2026/01/03 01:22:21 ")
+	// Format: YYYY/MM/DD HH:MM:SS
+	if len(line) >= 20 && line[4] == '/' && line[7] == '/' && line[10] == ' ' && line[13] == ':' && line[16] == ':' && line[19] == ' ' {
+		message = line[20:]
+	}
+
+	// Try to extract source from [Source] prefix
+	if len(message) > 0 && message[0] == '[' {
+		if idx := strings.Index(message, "] "); idx > 0 {
+			source = message[1:idx]
+			message = message[idx+2:]
+		}
+	}
+
+	// Determine log level from content
+	upperMsg := strings.ToUpper(message)
+	if strings.Contains(upperMsg, "ERROR") || strings.Contains(upperMsg, "FATAL") || strings.HasPrefix(upperMsg, "ERR:") {
+		level = LogLevelError
+	} else if strings.Contains(upperMsg, "WARN") || strings.HasPrefix(upperMsg, "WARNING:") {
+		level = LogLevelWarn
+	} else if strings.Contains(upperMsg, "DEBUG") || strings.HasPrefix(message, "DEBUG:") {
+		level = LogLevelDebug
+	}
+
+	return level, source, strings.TrimSpace(message)
 }
 
 // ActivityType represents the type of admin activity
@@ -246,6 +322,7 @@ const (
 	ActivityServerStart        ActivityType = "server_start"
 	ActivityServerStop         ActivityType = "server_stop"
 	ActivityAdminAction        ActivityType = "admin_action"
+	ActivityListenerSummary    ActivityType = "listener_summary" // Aggregated listener events
 )
 
 // ActivityEntry represents an admin activity event
@@ -257,7 +334,17 @@ type ActivityEntry struct {
 	Data      map[string]interface{} `json:"data,omitempty"`
 }
 
-// ActivityBuffer stores admin activity events
+// listenerEvent tracks a pending listener event for aggregation
+type listenerEvent struct {
+	mount       string
+	connects    int
+	disconnects int
+	ips         map[string]struct{}
+	firstTime   time.Time
+	lastTime    time.Time
+}
+
+// ActivityBuffer stores admin activity events with rate limiting
 type ActivityBuffer struct {
 	entries     []ActivityEntry
 	maxSize     int
@@ -265,6 +352,13 @@ type ActivityBuffer struct {
 	mu          sync.RWMutex
 	subscribers map[chan ActivityEntry]struct{}
 	subMu       sync.RWMutex
+
+	// Rate limiting for listener events
+	pendingListeners map[string]*listenerEvent // key: mount path
+	listenerMu       sync.Mutex
+	flushInterval    time.Duration
+	stopFlush        chan struct{}
+	flushRunning     bool
 }
 
 // NewActivityBuffer creates a new activity buffer
@@ -272,16 +366,123 @@ func NewActivityBuffer(maxSize int) *ActivityBuffer {
 	if maxSize <= 0 {
 		maxSize = 500
 	}
-	return &ActivityBuffer{
-		entries:     make([]ActivityEntry, 0, maxSize),
-		maxSize:     maxSize,
-		nextID:      1,
-		subscribers: make(map[chan ActivityEntry]struct{}),
+	ab := &ActivityBuffer{
+		entries:          make([]ActivityEntry, 0, maxSize),
+		maxSize:          maxSize,
+		nextID:           1,
+		subscribers:      make(map[chan ActivityEntry]struct{}),
+		pendingListeners: make(map[string]*listenerEvent),
+		flushInterval:    5 * time.Second, // Aggregate events over 5 seconds
+		stopFlush:        make(chan struct{}),
+	}
+	ab.startFlushLoop()
+	return ab
+}
+
+// startFlushLoop starts the background goroutine that flushes aggregated events
+func (ab *ActivityBuffer) startFlushLoop() {
+	ab.listenerMu.Lock()
+	if ab.flushRunning {
+		ab.listenerMu.Unlock()
+		return
+	}
+	ab.flushRunning = true
+	ab.listenerMu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(ab.flushInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				ab.flushPendingListeners()
+			case <-ab.stopFlush:
+				ab.flushPendingListeners() // Final flush
+				return
+			}
+		}
+	}()
+}
+
+// Stop stops the flush loop
+func (ab *ActivityBuffer) Stop() {
+	ab.listenerMu.Lock()
+	if ab.flushRunning {
+		close(ab.stopFlush)
+		ab.flushRunning = false
+	}
+	ab.listenerMu.Unlock()
+}
+
+// flushPendingListeners flushes any aggregated listener events
+func (ab *ActivityBuffer) flushPendingListeners() {
+	ab.listenerMu.Lock()
+	pending := ab.pendingListeners
+	ab.pendingListeners = make(map[string]*listenerEvent)
+	ab.listenerMu.Unlock()
+
+	for mount, evt := range pending {
+		if evt.connects == 0 && evt.disconnects == 0 {
+			continue
+		}
+
+		var msg string
+		uniqueIPs := len(evt.ips)
+
+		if evt.connects > 0 && evt.disconnects > 0 {
+			msg = fmt.Sprintf("%s: %d connects, %d disconnects (%d unique IPs)",
+				mount, evt.connects, evt.disconnects, uniqueIPs)
+		} else if evt.connects > 0 {
+			if evt.connects == 1 {
+				msg = fmt.Sprintf("Listener connected to %s", mount)
+			} else {
+				msg = fmt.Sprintf("%d listeners connected to %s (%d unique IPs)",
+					evt.connects, mount, uniqueIPs)
+			}
+		} else {
+			if evt.disconnects == 1 {
+				msg = fmt.Sprintf("Listener disconnected from %s", mount)
+			} else {
+				msg = fmt.Sprintf("%d listeners disconnected from %s",
+					evt.disconnects, mount)
+			}
+		}
+
+		data := map[string]interface{}{
+			"mount":        mount,
+			"connects":     evt.connects,
+			"disconnects":  evt.disconnects,
+			"unique_ips":   uniqueIPs,
+			"period_start": evt.firstTime,
+			"period_end":   evt.lastTime,
+		}
+
+		// Choose type based on which is more significant
+		actType := ActivityListenerSummary
+		if evt.connects > 0 && evt.disconnects == 0 {
+			actType = ActivityListenerConnect
+		} else if evt.disconnects > 0 && evt.connects == 0 {
+			actType = ActivityListenerDisconnect
+		}
+
+		ab.addDirect(actType, msg, data)
 	}
 }
 
-// Add adds a new activity entry
+// Add adds a new activity entry (for non-listener events)
 func (ab *ActivityBuffer) Add(actType ActivityType, message string, data map[string]interface{}) {
+	// Route listener events through aggregation
+	if actType == ActivityListenerConnect || actType == ActivityListenerDisconnect {
+		ab.addListenerEvent(actType, data)
+		return
+	}
+
+	ab.addDirect(actType, message, data)
+}
+
+// addDirect adds an entry directly without aggregation
+func (ab *ActivityBuffer) addDirect(actType ActivityType, message string, data map[string]interface{}) {
 	ab.mu.Lock()
 
 	entry := ActivityEntry{
@@ -303,9 +504,43 @@ func (ab *ActivityBuffer) Add(actType ActivityType, message string, data map[str
 	ab.broadcast(entry)
 }
 
+// addListenerEvent aggregates listener connect/disconnect events
+func (ab *ActivityBuffer) addListenerEvent(actType ActivityType, data map[string]interface{}) {
+	mount, _ := data["mount"].(string)
+	ip, _ := data["ip"].(string)
+
+	if mount == "" {
+		return
+	}
+
+	ab.listenerMu.Lock()
+	defer ab.listenerMu.Unlock()
+
+	evt, exists := ab.pendingListeners[mount]
+	if !exists {
+		evt = &listenerEvent{
+			mount:     mount,
+			ips:       make(map[string]struct{}),
+			firstTime: time.Now(),
+		}
+		ab.pendingListeners[mount] = evt
+	}
+
+	evt.lastTime = time.Now()
+	if ip != "" {
+		evt.ips[ip] = struct{}{}
+	}
+
+	if actType == ActivityListenerConnect {
+		evt.connects++
+	} else {
+		evt.disconnects++
+	}
+}
+
 // Helper methods for common activities
 func (ab *ActivityBuffer) ListenerConnected(mount, ip, userAgent string) {
-	ab.Add(ActivityListenerConnect, fmt.Sprintf("Listener connected to %s", mount), map[string]interface{}{
+	ab.Add(ActivityListenerConnect, "", map[string]interface{}{
 		"mount":      mount,
 		"ip":         ip,
 		"user_agent": userAgent,
@@ -313,7 +548,7 @@ func (ab *ActivityBuffer) ListenerConnected(mount, ip, userAgent string) {
 }
 
 func (ab *ActivityBuffer) ListenerDisconnected(mount, ip string, duration time.Duration) {
-	ab.Add(ActivityListenerDisconnect, fmt.Sprintf("Listener disconnected from %s after %s", mount, duration.Round(time.Second)), map[string]interface{}{
+	ab.Add(ActivityListenerDisconnect, "", map[string]interface{}{
 		"mount":    mount,
 		"ip":       ip,
 		"duration": duration.Seconds(),
