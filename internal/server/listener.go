@@ -34,7 +34,6 @@ const (
 	streamChunkSize = 16384
 
 	// sourceReconnectWait: How long listeners wait for source to reconnect
-	// TODO: Make configurable via config.Limits.SourceTimeout
 	sourceReconnectWait = 30 * time.Second
 
 	// icyMetaInterval: Standard Icecast metadata interval
@@ -237,18 +236,17 @@ func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount,
 	w.WriteHeader(http.StatusOK)
 }
 
-// streamToClient implements BULLETPROOF rate-controlled audio streaming.
+// streamToClient implements BULLETPROOF audio streaming.
 //
 // This is the heart of GoCast. It ensures smooth, uninterrupted audio by:
 //
-// 1. INITIAL BURST - Send 3 seconds of audio immediately to fill player buffer
-// 2. RATE CONTROL - Deliver at exactly the bitrate rate, not faster
-// 3. JITTER ABSORPTION - Server buffer smooths out source irregularities
+// 1. INITIAL BURST - Send available audio immediately to fill player buffer
+// 2. IMMEDIATE PASS-THROUGH - Send data as soon as it arrives from source
+// 3. AGGRESSIVE FLUSHING - Flush after every write to minimize latency
 //
-// Think of it like filling a bathtub while it drains:
-// - The player drains audio at a constant rate (the bitrate)
-// - We must fill at the same rate to keep the level stable
-// - Initial burst gives a "head start" to survive network hiccups
+// The large initial burst (64KB = ~1.6 seconds) gives the player enough
+// buffer to absorb any network jitter. After that, we pass data through
+// as fast as it arrives - the source controls the rate.
 func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metaInterval int) {
 	buffer := mount.Buffer()
 	if buffer == nil {
@@ -292,12 +290,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	if bitrate <= 0 {
 		bitrate = defaultBitrate
 	}
-
-	// Get client timeout from config
-	clientTimeout := cfg.Limits.ClientTimeout
-	if clientTimeout <= 0 {
-		clientTimeout = defaultClientTimeout
-	}
+	_ = bitrate // Used for future rate control if needed
 
 	// ==========================================================================
 	// PHASE 1: INITIAL BURST - Fill the player's buffer
@@ -329,7 +322,6 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 
 		n, newPos := buffer.ReadFromInto(readPos, readBuf)
 		if n == 0 {
-			// No more burst data available, that's OK
 			break
 		}
 
@@ -370,17 +362,12 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	}
 
 	// ==========================================================================
-	// PHASE 2: SMOOTH STREAMING - Send data as it arrives
+	// PHASE 2: IMMEDIATE PASS-THROUGH STREAMING
 	// ==========================================================================
 	//
-	// Key insight: The SOURCE already sends at the correct bitrate!
-	// We don't need to rate-limit - we just need to:
-	// 1. Read data as soon as it's available
-	// 2. Send it immediately
-	// 3. Flush after each write
-	//
-	// The large initial burst gives the player enough buffer to handle jitter.
-	// All config values are re-read periodically for hot-reload support.
+	// After the initial burst, we simply pass data through as it arrives.
+	// The source (RadioBOSS) sends at the correct bitrate.
+	// Our job is to forward it immediately with minimal latency.
 
 	// Track source state
 	var sourceDisconnectTime time.Time
@@ -389,26 +376,12 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	var metaByteCount int
 	var lastMeta string
 
-	// For hot-reload: periodically re-check config
-	lastConfigCheck := time.Now()
-	configCheckInterval := 5 * time.Second
-
 	for {
 		// Check for client disconnect
 		select {
 		case <-listener.Done():
 			return
 		default:
-		}
-
-		// Hot-reload: periodically re-check config values
-		if time.Since(lastConfigCheck) > configCheckInterval {
-			cfg = h.getConfig()
-			clientTimeout = cfg.Limits.ClientTimeout
-			if clientTimeout <= 0 {
-				clientTimeout = defaultClientTimeout
-			}
-			lastConfigCheck = time.Now()
 		}
 
 		// Check source status
@@ -427,10 +400,9 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		// Read data from buffer
 		n, newPos := buffer.ReadFromInto(readPos, readBuf)
 		if n == 0 {
-			// No data available - wait for more
-			if !buffer.WaitForDataContext(readPos, listener.Done()) {
-				return // Client disconnected while waiting
-			}
+			// No data - wait briefly then try again
+			// Use simple sleep instead of complex wait mechanisms
+			time.Sleep(time.Millisecond)
 			continue
 		}
 
@@ -451,7 +423,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 
 		listener.BytesSent += int64(len(data))
 
-		// Flush after each write for immediate delivery
+		// Flush immediately after every write
 		if hasFlusher {
 			flusher.Flush()
 		}
