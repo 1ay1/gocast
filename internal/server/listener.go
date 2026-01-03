@@ -20,44 +20,34 @@ import (
 var Version = "dev"
 
 // =============================================================================
-// BULLETPROOF STREAMING CONSTANTS
+// STREAMING CONSTANTS - Defaults that can be overridden by config
 // =============================================================================
 //
-// These values are carefully tuned for SMOOTH, UNINTERRUPTED audio streaming.
-// The key insight: we must deliver data at a CONSTANT RATE, not as fast as possible.
+// These are fallback values. The actual values come from:
+// - Global config: config.Limits.BurstSize, config.Limits.QueueSize
+// - Mount config: mount.Config.BurstSize, mount.Config.Bitrate
 //
-// Audio streaming is like filling a bathtub while draining it:
-// - Player drains at constant rate (bitrate)
-// - We must fill at the same rate
-// - Initial burst gives a "head start" to survive network hiccups
+// All values are hot-reloadable via the admin panel.
 const (
-	// streamChunkSize: Read buffer size
+	// streamChunkSize: Read buffer size (not configurable - internal optimization)
 	// 16KB allows efficient reads from the ring buffer
 	streamChunkSize = 16384
 
 	// sourceReconnectWait: How long listeners wait for source to reconnect
+	// TODO: Make configurable via config.Limits.SourceTimeout
 	sourceReconnectWait = 30 * time.Second
 
 	// icyMetaInterval: Standard Icecast metadata interval
 	icyMetaInterval = 16000
 
-	// defaultClientTimeout: Generous timeout for slow connections
+	// defaultClientTimeout: Fallback if not in config
 	defaultClientTimeout = 120 * time.Second
 
-	// ==========================================================================
-	// RATE CONTROL CONSTANTS - These are the KEY to smooth streaming
-	// ==========================================================================
+	// defaultBurstSize: Fallback burst size if not in config
+	// 64KB = ~1.6 seconds at 320kbps
+	defaultBurstSize = 65536
 
-	// initialBurstBytes: How many bytes of audio to send immediately
-	// ~64KB = ~1.6 seconds at 320kbps - fills player buffer quickly
-	initialBurstBytes = 65536
-
-	// sendIntervalMs: How often we send data (in milliseconds)
-	// 25ms = 40 sends per second = very smooth delivery
-	sendIntervalMs = 25
-
-	// defaultBitrate: Default bitrate if not specified (bits per second)
-	// 320kbps is common for high-quality MP3
+	// defaultBitrate: Fallback bitrate if not in config (bits per second)
 	defaultBitrate = 320000
 )
 
@@ -282,21 +272,31 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	defer h.bufPool.Put(bufPtr)
 
 	// ==========================================================================
-	// RATE CONTROL SETUP
+	// CONFIGURATION - All values from config, hot-reloadable
 	// ==========================================================================
 
-	// Get bitrate from mount config (bits per second)
-	bitrate := mount.Config.Bitrate * 1000 // Convert kbps to bps
+	// Get current config (supports hot-reload)
+	cfg := h.getConfig()
+
+	// Get burst size: mount-specific > global > default
+	burstSize := mount.Config.BurstSize
+	if burstSize <= 0 {
+		burstSize = cfg.Limits.BurstSize
+	}
+	if burstSize <= 0 {
+		burstSize = defaultBurstSize
+	}
+
+	// Get bitrate from mount config (kbps -> bps)
+	bitrate := mount.Config.Bitrate * 1000
 	if bitrate <= 0 {
 		bitrate = defaultBitrate
 	}
-	bytesPerSecond := bitrate / 8 // Convert to bytes per second
 
-	// Calculate bytes to send per interval
-	// At 320kbps (40KB/s) with 25ms interval = 1000 bytes per send
-	bytesPerInterval := (bytesPerSecond * sendIntervalMs) / 1000
-	if bytesPerInterval < 500 {
-		bytesPerInterval = 500 // Minimum chunk size
+	// Get client timeout from config
+	clientTimeout := cfg.Limits.ClientTimeout
+	if clientTimeout <= 0 {
+		clientTimeout = defaultClientTimeout
 	}
 
 	// ==========================================================================
@@ -305,13 +305,9 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 
 	// Start reading from behind the live position to get burst data
 	writePos := buffer.WritePos()
-	burstAvailable := int64(buffer.BurstSize())
+	burstAvailable := int64(burstSize)
 	if burstAvailable > writePos {
 		burstAvailable = writePos
-	}
-	// Limit to our target burst size
-	if burstAvailable > initialBurstBytes {
-		burstAvailable = initialBurstBytes
 	}
 
 	readPos := writePos - burstAvailable
@@ -374,7 +370,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	}
 
 	// ==========================================================================
-	// PHASE 2: SMOOTH STREAMING - Send data as it arrives, no artificial rate limiting
+	// PHASE 2: SMOOTH STREAMING - Send data as it arrives
 	// ==========================================================================
 	//
 	// Key insight: The SOURCE already sends at the correct bitrate!
@@ -384,6 +380,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	// 3. Flush after each write
 	//
 	// The large initial burst gives the player enough buffer to handle jitter.
+	// All config values are re-read periodically for hot-reload support.
 
 	// Track source state
 	var sourceDisconnectTime time.Time
@@ -392,12 +389,26 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	var metaByteCount int
 	var lastMeta string
 
+	// For hot-reload: periodically re-check config
+	lastConfigCheck := time.Now()
+	configCheckInterval := 5 * time.Second
+
 	for {
 		// Check for client disconnect
 		select {
 		case <-listener.Done():
 			return
 		default:
+		}
+
+		// Hot-reload: periodically re-check config values
+		if time.Since(lastConfigCheck) > configCheckInterval {
+			cfg = h.getConfig()
+			clientTimeout = cfg.Limits.ClientTimeout
+			if clientTimeout <= 0 {
+				clientTimeout = defaultClientTimeout
+			}
+			lastConfigCheck = time.Now()
 		}
 
 		// Check source status

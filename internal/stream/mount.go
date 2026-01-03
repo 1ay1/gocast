@@ -123,9 +123,9 @@ type Mount struct {
 	peakListeners       int32 // Deprecated: raw connection peak
 	peakUniqueListeners int32 // Peak unique listeners (by IP+UserAgent)
 	mu                  sync.RWMutex
-	listenerMu    sync.RWMutex
-	configMu      sync.RWMutex
-	fallbackMount string
+	listenerMu          sync.RWMutex
+	configMu            sync.RWMutex
+	fallbackMount       string
 }
 
 // NewMount creates a new mount point
@@ -429,6 +429,21 @@ func (m *Mount) Buffer() *Buffer {
 	return m.buffer
 }
 
+// SetBurstSize updates the burst size for hot-reload support
+func (m *Mount) SetBurstSize(size int) {
+	if m.buffer != nil && size > 0 {
+		m.buffer.SetBurstSize(size)
+	}
+}
+
+// UpdateFromConfig updates mount settings from config for hot-reload
+func (m *Mount) UpdateFromConfig(cfg *config.MountConfig) {
+	m.SetConfig(cfg)
+	if cfg.BurstSize > 0 {
+		m.SetBurstSize(cfg.BurstSize)
+	}
+}
+
 // Notify returns the notification channel for new data
 // Now delegated to buffer for more efficient notification
 func (m *Mount) Notify() <-chan struct{} {
@@ -506,11 +521,14 @@ func (mm *MountManager) SetConfig(cfg *config.Config) {
 	// Update existing mount configs and create new ones from config
 	for path, mountCfg := range cfg.Mounts {
 		if mount, exists := mm.mounts[path]; exists {
-			// Update existing mount's config
-			mount.SetConfig(mountCfg)
+			// Update existing mount's config with full hot-reload support
+			// This updates config AND burst size
+			mount.UpdateFromConfig(mountCfg)
+			mm.logger("[HotReload] Updated mount %s config", path)
 		} else {
 			// Create new mount from config
 			mm.mounts[path] = NewMount(path, mountCfg, cfg.Limits.QueueSize, cfg.Limits.BurstSize)
+			mm.logger("[HotReload] Created new mount %s", path)
 		}
 	}
 
