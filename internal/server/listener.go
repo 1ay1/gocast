@@ -608,12 +608,16 @@ func (h *StatusHandler) getConfig() *config.Config {
 
 // ServeHTTP serves the status page
 func (h *StatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Check query parameter first, then Accept header
+	format := r.URL.Query().Get("format")
 	accept := r.Header.Get("Accept")
-	if strings.Contains(accept, "application/json") {
+
+	switch {
+	case format == "json" || strings.Contains(accept, "application/json"):
 		h.serveJSON(w)
-	} else if strings.Contains(accept, "text/xml") || strings.Contains(accept, "application/xml") {
+	case format == "xml" || strings.Contains(accept, "text/xml") || strings.Contains(accept, "application/xml"):
 		h.serveXML(w)
-	} else {
+	default:
 		h.serveHTML(w)
 	}
 }
