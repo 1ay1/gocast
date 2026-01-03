@@ -586,6 +586,8 @@ func (h *MetadataHandler) getConfig() *config.Config {
 }
 
 // HandleMetadataUpdate handles /admin/metadata requests
+// Compatible with Icecast clients (RadioBOSS, BUTT, etc.)
+// Accepts source password, mount-specific password, or admin credentials
 func (h *MetadataHandler) HandleMetadataUpdate(w http.ResponseWriter, r *http.Request) {
 	// Parse query parameters
 	mount := r.URL.Query().Get("mount")
@@ -597,13 +599,14 @@ func (h *MetadataHandler) HandleMetadataUpdate(w http.ResponseWriter, r *http.Re
 	// Authenticate
 	username, password, ok := r.BasicAuth()
 	if !ok {
-		w.Header().Set("WWW-Authenticate", `Basic realm="GoCast Admin"`)
+		w.Header().Set("WWW-Authenticate", `Basic realm="GoCast"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	// Check credentials (source or admin)
 	if !h.checkCredentials(username, password, mount) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="GoCast"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -637,23 +640,25 @@ func (h *MetadataHandler) HandleMetadataUpdate(w http.ResponseWriter, r *http.Re
 }
 
 // checkCredentials verifies credentials for metadata updates
+// Accepts: admin credentials, source password, or mount-specific password
 func (h *MetadataHandler) checkCredentials(username, password, mountPath string) bool {
 	cfg := h.getConfig()
 
-	// Check source credentials
-	if username == "source" || username == "" {
-		// Check mount-specific password
-		if mount, exists := cfg.Mounts[mountPath]; exists {
-			if mount.Password != "" && password == mount.Password {
-				return true
-			}
-		}
-		return password == cfg.Auth.SourcePassword
+	// Check admin credentials first
+	if username == cfg.Auth.AdminUser && password == cfg.Auth.AdminPassword {
+		return true
 	}
 
-	// Check admin credentials
-	if username == cfg.Auth.AdminUser {
-		return password == cfg.Auth.AdminPassword
+	// Check mount-specific password (any username)
+	if mount, exists := cfg.Mounts[mountPath]; exists {
+		if mount.Password != "" && password == mount.Password {
+			return true
+		}
+	}
+
+	// Check global source password (any username)
+	if password == cfg.Auth.SourcePassword {
+		return true
 	}
 
 	return false

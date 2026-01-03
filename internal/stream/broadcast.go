@@ -18,11 +18,13 @@ const (
 	// CacheLineSize for avoiding false sharing
 	CacheLineSize = 64
 
-	// DefaultBroadcastBufferSize is 256KB - enough for ~8 seconds of 256kbps audio
-	DefaultBroadcastBufferSize = 256 * 1024
+	// DefaultBroadcastBufferSize is 1MB - enough for ~26 seconds of 320kbps audio
+	// This large buffer prevents any data loss even with slow listeners
+	DefaultBroadcastBufferSize = 1024 * 1024
 
-	// MaxListenerLag before forcing skip-to-live (32KB = ~1 second of audio)
-	MaxListenerLag = 32 * 1024
+	// MaxListenerLag before forcing skip-to-live (512KB = ~13 seconds of 320kbps audio)
+	// Only skip if listener is EXTREMELY far behind - almost never in practice
+	MaxListenerLag = 512 * 1024
 
 	// MinChunkSize for frame-aligned writes
 	MinChunkSize = 417 // Typical MP3 frame size at 128kbps

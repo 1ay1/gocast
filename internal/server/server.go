@@ -440,10 +440,44 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 	httpAddr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.Server.Port)
 
 	// HTTP handler that checks dynamically if HTTPS is available
-	// This allows us to start redirecting after certificate is obtained without restart
+	// IMPORTANT: We only redirect browser/admin requests to HTTPS
+	// Stream listeners and source clients MUST stay on HTTP for compatibility
 	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow source connections (PUT/SOURCE) on HTTP - they don't follow redirects
+		path := r.URL.Path
+
+		// NEVER redirect source connections (PUT/SOURCE) - they don't follow redirects
 		if r.Method == "PUT" || r.Method == "SOURCE" {
+			s.mainHandler.ServeHTTP(w, r)
+			return
+		}
+
+		// NEVER redirect /admin/metadata - Icecast clients don't follow redirects
+		if strings.HasPrefix(path, "/admin/metadata") {
+			s.mainHandler.ServeHTTP(w, r)
+			return
+		}
+
+		// NEVER redirect /admin/listclients - RadioBOSS uses this
+		if strings.HasPrefix(path, "/admin/listclients") {
+			s.mainHandler.ServeHTTP(w, r)
+			return
+		}
+
+		// NEVER redirect /admin/stats - RadioBOSS uses this
+		if strings.HasPrefix(path, "/admin/stats") {
+			s.mainHandler.ServeHTTP(w, r)
+			return
+		}
+
+		// NEVER redirect /status - used by monitoring tools
+		if strings.HasPrefix(path, "/status") {
+			s.mainHandler.ServeHTTP(w, r)
+			return
+		}
+
+		// NEVER redirect stream paths (anything that's not /admin or /)
+		// This is critical for listener compatibility - many players don't follow redirects
+		if !strings.HasPrefix(path, "/admin") && path != "/" {
 			s.mainHandler.ServeHTTP(w, r)
 			return
 		}
@@ -452,17 +486,21 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 		httpsReady := s.httpsRunning
 		s.httpsRunningMu.RUnlock()
 
+		// Only redirect browser requests (admin panel) to HTTPS
 		if httpsReady && r.Method == http.MethodGet {
-			// Only redirect GET requests (browsers) to HTTPS
-			target := fmt.Sprintf("https://%s", s.config.Server.Hostname)
-			if s.sslPort != 443 {
-				target = fmt.Sprintf("https://%s:%d", s.config.Server.Hostname, s.sslPort)
+			// Only redirect admin panel and root page
+			if strings.HasPrefix(path, "/admin") || path == "/" {
+				target := fmt.Sprintf("https://%s", s.config.Server.Hostname)
+				if s.sslPort != 443 {
+					target = fmt.Sprintf("https://%s:%d", s.config.Server.Hostname, s.sslPort)
+				}
+				target += r.URL.RequestURI()
+				http.Redirect(w, r, target, http.StatusMovedPermanently)
+				return
 			}
-			target += r.URL.RequestURI()
-			http.Redirect(w, r, target, http.StatusMovedPermanently)
-			return
 		}
-		// Serve on HTTP for non-GET requests or when HTTPS not available
+
+		// Serve on HTTP
 		s.mainHandler.ServeHTTP(w, r)
 	})
 
@@ -762,7 +800,83 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authenticate admin
+	// Handle metadata endpoint separately - it has its own auth that allows source credentials
+	// This is required for Icecast compatibility (RadioBOSS, BUTT, etc. send source credentials)
+	if path == "/admin/metadata" {
+		s.metadataHandler.HandleMetadataUpdate(w, r)
+		return
+	}
+
+	// Handle stats endpoint - RadioBOSS uses source credentials to fetch stats
+	// Accept both admin and source credentials for Icecast compatibility
+	if path == "/admin/stats" || path == "/admin/stats.xml" {
+		username, password, ok := r.BasicAuth()
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Basic realm="GoCast"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Accept admin credentials
+		if username == s.config.Auth.AdminUser && password == s.config.Auth.AdminPassword {
+			s.handleAdminStats(w, r)
+			return
+		}
+		// Accept source password (Icecast compatibility for RadioBOSS, BUTT, etc.)
+		mountPath := r.URL.Query().Get("mount")
+		if mountPath != "" {
+			if mount := s.mountManager.GetMount(mountPath); mount != nil {
+				mountCfg := mount.GetConfig()
+				if mountCfg != nil && mountCfg.Password != "" && password == mountCfg.Password {
+					s.handleAdminStats(w, r)
+					return
+				}
+			}
+		}
+		// Accept global source password
+		if password == s.config.Auth.SourcePassword {
+			s.handleAdminStats(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="GoCast"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Handle listclients endpoint - also allow source credentials for RadioBOSS
+	if path == "/admin/listclients" {
+		username, password, ok := r.BasicAuth()
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Basic realm="GoCast"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Accept admin credentials
+		if username == s.config.Auth.AdminUser && password == s.config.Auth.AdminPassword {
+			s.handleAdminListClients(w, r)
+			return
+		}
+		// Accept source password (Icecast compatibility)
+		mountPath := r.URL.Query().Get("mount")
+		if mountPath != "" {
+			if mount := s.mountManager.GetMount(mountPath); mount != nil {
+				mountCfg := mount.GetConfig()
+				if mountCfg != nil && mountCfg.Password != "" && password == mountCfg.Password {
+					s.handleAdminListClients(w, r)
+					return
+				}
+			}
+		}
+		// Accept global source password
+		if password == s.config.Auth.SourcePassword {
+			s.handleAdminListClients(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="GoCast"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Authenticate admin (all other endpoints require admin credentials)
 	username, password, ok := r.BasicAuth()
 	if !ok || username != s.config.Auth.AdminUser || password != s.config.Auth.AdminPassword {
 		w.Header().Set("WWW-Authenticate", `Basic realm="GoCast Admin"`)
@@ -1133,12 +1247,14 @@ func (s *Server) sendSSEStats(w http.ResponseWriter, flusher http.Flusher) {
 		if title == "" {
 			title = stat.Metadata.Name
 		}
+		// Include metadata object for dashboard compatibility (same format as /status JSON)
 		sb.WriteString(fmt.Sprintf(
-			`{"path":"%s","mount":"%s","listeners":%d,"peak":%d,"active":%v,"title":"%s","artist":"%s","album":"%s","name":"%s","genre":"%s","description":"%s","bitrate":%d,"content_type":"%s"}`,
+			`{"path":"%s","mount":"%s","listeners":%d,"peak":%d,"active":%v,"title":"%s","artist":"%s","album":"%s","name":"%s","genre":"%s","description":"%s","bitrate":%d,"content_type":"%s","metadata":{"stream_title":"%s","artist":"%s","title":"%s"}}`,
 			stat.Path, stat.Path, stat.Listeners, stat.PeakListeners, stat.Active,
 			escapeJSON(title), escapeJSON(stat.Metadata.Artist), escapeJSON(stat.Metadata.Album),
 			escapeJSON(stat.Metadata.Name), escapeJSON(stat.Metadata.Genre),
 			escapeJSON(stat.Metadata.Description), stat.Metadata.Bitrate, stat.ContentType,
+			escapeJSON(stat.Metadata.StreamTitle), escapeJSON(stat.Metadata.Artist), escapeJSON(stat.Metadata.Title),
 		))
 	}
 	sb.WriteString("]}")

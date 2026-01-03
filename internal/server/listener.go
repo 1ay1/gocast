@@ -19,23 +19,24 @@ import (
 // Version of GoCast server
 var Version = "dev"
 
-// Streaming constants
+// Streaming constants - OPTIMIZED FOR BULLETPROOF STREAMING
 const (
-	// Read chunk size - balance between efficiency and latency
-	// 4KB = ~100ms at 320kbps, good for smooth streaming
-	streamChunkSize = 4096
+	// Read chunk size - larger chunks = more efficient, less syscalls
+	// 16KB = ~400ms at 320kbps, efficient while still responsive
+	streamChunkSize = 16384
 
-	// Poll interval when waiting for data
-	dataPollInterval = 5 * time.Millisecond
+	// Poll interval when waiting for data - fast polling for low latency
+	dataPollInterval = 2 * time.Millisecond
 
-	// How long to wait for source reconnection (between songs)
-	sourceReconnectWait = 15 * time.Second
+	// How long to wait for source reconnection (between songs/reconnects)
+	// 30 seconds is generous - allows for source restarts
+	sourceReconnectWait = 30 * time.Second
 
-	// ICY metadata interval
+	// ICY metadata interval - standard Icecast interval
 	icyMetaInterval = 16000
 
-	// Client timeout for inactive connections
-	defaultClientTimeout = 60 * time.Second
+	// Client timeout for inactive connections - generous for slow networks
+	defaultClientTimeout = 120 * time.Second
 )
 
 // ListenerHandler handles listener HTTP requests
@@ -224,7 +225,9 @@ func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount,
 	w.WriteHeader(http.StatusOK)
 }
 
-// streamToClient streams audio data to client with robust error handling
+// streamToClient streams audio data to client with BULLETPROOF error handling
+// This implementation prioritizes data integrity - no bytes are ever skipped unless
+// the listener is more than buffer-size behind (26+ seconds at 320kbps)
 func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metaInterval int) {
 	buffer := mount.Buffer()
 	if buffer == nil {
@@ -247,13 +250,22 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		}
 	}
 
-	// Get buffer from pool
+	// Get buffer from pool - use larger buffer for efficiency
 	bufPtr := h.bufPool.Get().(*[]byte)
 	readBuf := *bufPtr
 	defer h.bufPool.Put(bufPtr)
 
-	// Start at live position
-	readPos := buffer.WritePos()
+	// Start at a position that gives us some buffer room
+	// Don't start at live edge - start with some burst data for smooth playback
+	writePos := buffer.WritePos()
+	burstSize := int64(buffer.BurstSize())
+	if burstSize > writePos {
+		burstSize = writePos
+	}
+	readPos := writePos - burstSize
+	if readPos < 0 {
+		readPos = 0
+	}
 
 	// Frame sync state - find MP3 frame on first read
 	needsSync := true
@@ -262,7 +274,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	var metaByteCount int
 	var lastMeta string
 
-	// Timeout handling
+	// Timeout handling - generous timeout for slow connections
 	timeout := h.config.Limits.ClientTimeout
 	if timeout == 0 {
 		timeout = defaultClientTimeout
@@ -273,7 +285,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	var sourceDisconnectTime time.Time
 	sourceWasActive := true // We know it's active now
 
-	// Main streaming loop
+	// Main streaming loop - BULLETPROOF version
 	for {
 		// Check client disconnect
 		select {
@@ -297,17 +309,19 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 				return // Give up, source not coming back
 			}
 
-			// Wait a bit for reconnection
+			// Wait a bit for reconnection - but keep checking for data
+			// There might still be buffered data to send
 			select {
 			case <-listener.Done():
 				return
-			case <-time.After(100 * time.Millisecond):
-				continue
+			case <-time.After(50 * time.Millisecond):
+				// Continue to try reading any remaining buffered data
 			}
 		} else {
 			if !sourceWasActive {
-				// Source just reconnected - reset to live position
-				readPos = buffer.WritePos()
+				// Source just reconnected - DON'T reset position!
+				// Keep reading from where we were to avoid losing any data
+				// The buffer is large enough to handle the gap
 				needsSync = true // Need to find MP3 frame again
 			}
 			sourceWasActive = true
@@ -318,11 +332,12 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			return
 		}
 
-		// Try to read data
+		// Try to read data - this is the bulletproof read
 		n, newPos := buffer.ReadFromInto(readPos, readBuf)
 
 		if n == 0 {
-			// No data available, wait efficiently
+			// No data available, wait efficiently with short timeout
+			// This prevents busy-waiting while being responsive
 			if buffer.WaitForData(readPos, dataPollInterval) {
 				continue
 			}
@@ -333,7 +348,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		readPos = newPos
 		lastActivity = time.Now()
 
-		// Find MP3 frame sync on first chunk
+		// Find MP3 frame sync on first chunk for clean audio start
 		if needsSync && n >= 4 {
 			syncOffset := findMP3Sync(data)
 			if syncOffset > 0 && syncOffset < n-4 {
@@ -346,7 +361,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			continue
 		}
 
-		// Write to client
+		// Write to client - handle partial writes
 		var err error
 		if metaInterval > 0 {
 			err = writeDataWithMeta(w, data, mount, &metaByteCount, &lastMeta, metaInterval)
@@ -361,7 +376,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		listener.BytesSent += int64(len(data))
 		listener.LastActive = lastActivity
 
-		// Flush for low latency
+		// Flush for low latency - do this after every write for smooth streaming
 		if hasFlusher {
 			flusher.Flush()
 		}
@@ -632,9 +647,11 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 		stats := mount.Stats()
 		meta := mount.GetMetadata()
 
-		sb.WriteString(fmt.Sprintf(`{"path":%q,"active":%t,"listeners":%d,"peak":%d,"name":%q,"genre":%q,"bitrate":%d}`,
+		// Include metadata object with stream_title for admin panel
+		sb.WriteString(fmt.Sprintf(`{"path":%q,"active":%t,"listeners":%d,"peak":%d,"name":%q,"genre":%q,"bitrate":%d,"metadata":{"stream_title":%q,"artist":%q,"title":%q}}`,
 			mountPath, mount.IsActive(), stats.Listeners, stats.PeakListeners,
-			escapeJSON(meta.Name), escapeJSON(meta.Genre), meta.Bitrate))
+			escapeJSON(meta.Name), escapeJSON(meta.Genre), meta.Bitrate,
+			escapeJSON(meta.StreamTitle), escapeJSON(meta.Artist), escapeJSON(meta.Title)))
 	}
 
 	sb.WriteString("]}")

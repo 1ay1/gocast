@@ -310,6 +310,12 @@ const DashboardPage = {
                             <span class="stream-meta-value">${mount.bitrate || 128} kbps</span>
                         </div>
                     </div>
+                    ${mount.active ? `
+                    <div class="stream-nowplaying" style="margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px;">
+                        <span style="color: #888; font-size: 11px;">🎵 Now Playing:</span>
+                        <div style="color: #fff; font-size: 13px; margin-top: 2px;">${mount.metadata && mount.metadata.stream_title ? UI.escapeHtml(mount.metadata.stream_title) : '<span style="color: #666; font-style: italic;">No song info</span>'}</div>
+                    </div>
+                    ` : ''}
                 </div>
                 ${
                   mount.active
