@@ -441,9 +441,12 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		// Read data from buffer
 		n, newPos := buffer.ReadFromInto(readPos, readBuf)
 		if n == 0 {
-			// No data - wait briefly then try again
-			// Use simple sleep instead of complex wait mechanisms
-			time.Sleep(time.Millisecond)
+			// No data - wait for data with instant wakeup when source writes
+			// This is MUCH better than polling - zero latency when data arrives
+			if !buffer.WaitForDataContext(readPos, listener.Done()) {
+				// Listener disconnected while waiting
+				return
+			}
 			continue
 		}
 

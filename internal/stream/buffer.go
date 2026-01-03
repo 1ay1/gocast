@@ -408,7 +408,7 @@ func (b *Buffer) WaitForDataFast(pos int64) bool {
 }
 
 // WaitForDataContext waits for new data, respecting cancellation
-// BULLETPROOF: Zero allocations in the hot path
+// BULLETPROOF: Uses sync.Cond for INSTANT wakeup when data arrives
 // Returns true if data available, false if cancelled
 func (b *Buffer) WaitForDataContext(pos int64, done <-chan struct{}) bool {
 	// Fast path: data already available (most common case)
@@ -416,26 +416,47 @@ func (b *Buffer) WaitForDataContext(pos int64, done <-chan struct{}) bool {
 		return true
 	}
 
-	// Ultra-simple spin-wait: check data, check cancel, sleep tiny bit
-	// NO tickers, NO allocations - just raw polling
-	// This is the fastest possible approach for real-time streaming
-	for {
-		// Check for cancellation (non-blocking)
+	// Use sync.Cond for instant wakeup - NO polling delays
+	// When source writes data, it calls Broadcast() which wakes ALL waiting listeners instantly
+	b.condMu.Lock()
+
+	// Check again with lock held (double-check pattern)
+	if b.writePos.Load() > pos {
+		b.condMu.Unlock()
+		return true
+	}
+
+	// Start a goroutine to watch for cancellation
+	// When done channel closes, we broadcast to wake up the Wait()
+	cancelled := make(chan struct{})
+	go func() {
 		select {
 		case <-done:
+			close(cancelled)
+			b.cond.Broadcast()
+		case <-cancelled:
+			// Normal exit, do nothing
+		}
+	}()
+
+	// Wait for data - will be woken INSTANTLY when source writes (via Broadcast)
+	for b.writePos.Load() <= pos {
+		// Check if cancelled
+		select {
+		case <-done:
+			b.condMu.Unlock()
+			close(cancelled)
 			return false
 		default:
 		}
 
-		// Check for data
-		if b.writePos.Load() > pos {
-			return true
-		}
-
-		// Tiny sleep to prevent CPU spin
-		// 500 microseconds = 0.5ms - fast enough for audio, light on CPU
-		time.Sleep(500 * time.Microsecond)
+		// Wait for broadcast from Write() or cancellation
+		b.cond.Wait()
 	}
+
+	b.condMu.Unlock()
+	close(cancelled)
+	return true
 }
 
 // WaitForDataWithDeadline waits for new data until deadline
