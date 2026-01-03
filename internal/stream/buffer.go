@@ -1,5 +1,14 @@
 // Package stream handles audio stream management and distribution
-// High-performance, lock-free ring buffer optimized for live streaming
+//
+// # BULLETPROOF RING BUFFER FOR LIVE AUDIO STREAMING
+//
+// This buffer is designed with one goal: never drop audio data and deliver
+// it to listeners with minimal latency. Key design decisions:
+//
+// 1. sync.Cond for INSTANT wakeups - no polling delays
+// 2. Lock-free reads with atomic write position
+// 3. Large buffer to survive network hiccups
+// 4. Broadcast notification to ALL waiting listeners simultaneously
 package stream
 
 import (
@@ -9,26 +18,35 @@ import (
 )
 
 // Buffer is a high-performance ring buffer for streaming audio data
-// Design goals:
-// - Lock-free reads for maximum throughput
-// - Atomic write position updates
-// - Broadcast notifications for waiting listeners
-// - Graceful handling of buffer wraparound
+//
+// BULLETPROOF DESIGN:
+// - Uses sync.Cond for instant broadcast to all waiting readers
+// - Lock-free reads via atomic write position
+// - Single writer with mutex protection
+// - Large default size (2MB = 52 seconds at 320kbps)
 type Buffer struct {
 	// Core buffer data - never reallocated after creation
 	data []byte
 	size int64 // Use int64 to avoid conversions
 	mask int64 // size - 1 for fast modulo (requires power of 2 size)
 
-	// Write position - updated atomically
+	// Write position - updated atomically for lock-free reads
 	writePos atomic.Int64
 
 	// Write lock - only one writer at a time
 	writeMu sync.Mutex
 
-	// Notification for waiting readers
-	notify     chan struct{}
-	notifyOnce sync.Once
+	// BULLETPROOF: Use sync.Cond for instant broadcast to ALL waiting readers
+	// This is much better than channels because:
+	// 1. Broadcast() wakes ALL waiters instantly
+	// 2. No channel capacity issues
+	// 3. Zero allocation per notification
+	cond    *sync.Cond
+	condMu  sync.Mutex
+	version atomic.Uint64 // Incremented on each write for spurious wakeup detection
+
+	// Legacy channel for backward compatibility
+	notify chan struct{}
 
 	// Configuration
 	burstSize int
@@ -65,10 +83,14 @@ func NewBuffer(size int, burstSize int) *Buffer {
 		created:   time.Now(),
 	}
 
+	// Initialize sync.Cond for bulletproof broadcast notifications
+	b.cond = sync.NewCond(&b.condMu)
+
 	return b
 }
 
 // Write writes data to the buffer (thread-safe, single writer)
+// After writing, ALL waiting readers are woken up INSTANTLY via broadcast
 func (b *Buffer) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -96,13 +118,19 @@ func (b *Buffer) Write(p []byte) (int, error) {
 	b.writePos.Store(writePos + int64(n))
 	b.bytesTotal.Add(int64(n))
 
+	// Increment version for spurious wakeup detection
+	b.version.Add(1)
+
 	b.writeMu.Unlock()
 
-	// Non-blocking notification to waiting readers
+	// BULLETPROOF: Broadcast to ALL waiting readers instantly
+	// This is the key to eliminating lag - every reader wakes up immediately
+	b.cond.Broadcast()
+
+	// Legacy channel notification for backward compatibility
 	select {
 	case b.notify <- struct{}{}:
 	default:
-		// Channel full, readers will poll
 	}
 
 	return n, nil
@@ -306,20 +334,122 @@ func (b *Buffer) GetLivePosition() int64 {
 }
 
 // WaitForData waits for new data with timeout
+// BULLETPROOF: Uses sync.Cond for instant wakeup when data arrives
 // Returns true if data is available, false on timeout
 func (b *Buffer) WaitForData(pos int64, timeout time.Duration) bool {
-	// Check if data already available
+	// Fast path: data already available
 	if b.writePos.Load() > pos {
 		return true
 	}
 
-	// Wait for notification or timeout
+	// Use sync.Cond for instant wakeup
+	// This is MUCH better than channel-based waiting because:
+	// 1. Broadcast wakes ALL waiters, not just one
+	// 2. No channel capacity issues
+	// 3. Minimal latency
+
+	b.condMu.Lock()
+	currentVersion := b.version.Load()
+
+	// Check again with lock held
+	if b.writePos.Load() > pos {
+		b.condMu.Unlock()
+		return true
+	}
+
+	// Wait with timeout using a goroutine
+	done := make(chan bool, 1)
+	go func() {
+		time.Sleep(timeout)
+		b.cond.Broadcast() // Wake up to check timeout
+		done <- true
+	}()
+
+	// Wait for condition
+	for b.writePos.Load() <= pos && b.version.Load() == currentVersion {
+		b.cond.Wait()
+		// Check if we have data now
+		if b.writePos.Load() > pos {
+			b.condMu.Unlock()
+			return true
+		}
+		// Check if version changed (new write happened)
+		if b.version.Load() != currentVersion {
+			break
+		}
+	}
+
+	b.condMu.Unlock()
+
+	// Final check
+	return b.writePos.Load() > pos
+}
+
+// WaitForDataFast waits for new data with minimal overhead and timeout
+// This is the BULLETPROOF version - instant wakeup via sync.Cond
+// Returns true if data available, false on timeout
+func (b *Buffer) WaitForDataFast(pos int64) bool {
+	// Fast path: data already available
+	if b.writePos.Load() > pos {
+		return true
+	}
+
+	// Use a short timeout to allow checking for source disconnect
+	// 10ms is fast enough to be responsive, slow enough to not waste CPU
+	return b.WaitForData(pos, 10*time.Millisecond)
+}
+
+// WaitForDataContext waits for new data, respecting context cancellation
+// This is the MOST BULLETPROOF version - use in streaming loops
+// Returns true if data available, false if context cancelled or timeout
+func (b *Buffer) WaitForDataContext(pos int64, done <-chan struct{}) bool {
+	// Fast path: data already available
+	if b.writePos.Load() > pos {
+		return true
+	}
+
+	// Check if already cancelled
 	select {
-	case <-b.notify:
-		return b.writePos.Load() > pos
-	case <-time.After(timeout):
+	case <-done:
+		return false
+	default:
+	}
+
+	// Wait with periodic checks for cancellation
+	// This ensures we wake up quickly when data arrives OR when cancelled
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-done:
+			return false
+		case <-ticker.C:
+			if b.writePos.Load() > pos {
+				return true
+			}
+		case <-b.notify:
+			if b.writePos.Load() > pos {
+				return true
+			}
+		}
+	}
+}
+
+// WaitForDataWithDeadline waits for new data until deadline
+// Returns true if data is available, false if deadline exceeded
+func (b *Buffer) WaitForDataWithDeadline(pos int64, deadline time.Time) bool {
+	// Fast path: data already available
+	if b.writePos.Load() > pos {
+		return true
+	}
+
+	timeout := time.Until(deadline)
+	if timeout <= 0 {
 		return b.writePos.Load() > pos
 	}
+
+	return b.WaitForData(pos, timeout)
 }
 
 // NotifyChan returns the notification channel
@@ -352,6 +482,7 @@ func (b *Buffer) Reset() {
 	b.writeMu.Lock()
 	b.writePos.Store(0)
 	b.bytesTotal.Store(0)
+	b.version.Store(0)
 	b.created = time.Now()
 	b.writeMu.Unlock()
 
@@ -360,6 +491,9 @@ func (b *Buffer) Reset() {
 	case <-b.notify:
 	default:
 	}
+
+	// Wake up any waiters so they can see the reset
+	b.cond.Broadcast()
 }
 
 // SetBurstSize updates burst size

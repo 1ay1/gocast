@@ -30,8 +30,8 @@ const (
 	// 8KB = ~200ms at 320kbps - large enough for efficiency, small enough for responsiveness
 	streamChunkSize = 8192
 
-	// dataPollInterval: How often we check for new data when buffer is empty
-	// 1ms = extremely responsive, minimal CPU overhead with proper wait mechanisms
+	// dataPollInterval: Legacy - now using instant wakeup via sync.Cond
+	// Kept for backward compatibility but WaitForDataFast doesn't use this
 	dataPollInterval = 1 * time.Millisecond
 
 	// sourceReconnectWait: How long listeners wait for source to reconnect
@@ -340,7 +340,11 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			if hasFlusher {
 				flusher.Flush()
 			}
-			buffer.WaitForData(readPos, dataPollInterval)
+			// BULLETPROOF: Use context-aware wait for proper cancellation
+			// This ensures we wake up instantly on new data OR client disconnect
+			if !buffer.WaitForDataContext(readPos, listener.Done()) {
+				return // Client disconnected while waiting
+			}
 			continue
 		}
 

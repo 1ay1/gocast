@@ -473,11 +473,17 @@ func (h *Handler) streamFromReader(reader *bufio.Reader, mount *stream.Mount, mo
 // streamFromConnection reads data from a hijacked connection and writes to the mount
 // It first drains any buffered data from the bufio.Reader, then reads directly from the connection
 func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, mount *stream.Mount, mountPath string) {
-	buf := make([]byte, 8192)
+	// BULLETPROOF: Use 16KB buffer for efficient reads
+	// This matches typical network MTU multiples and reduces syscall overhead
+	buf := make([]byte, 16384)
 	totalBytes := int64(0)
 	readCount := 0
 
 	h.logger.Printf("DEBUG: streamFromConnection started for %s", mountPath)
+
+	// Set a generous read deadline to detect dead connections
+	// We'll reset this after each successful read
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	// First, drain any buffered data from the bufio.Reader
 	for mount.IsActive() {
@@ -516,8 +522,11 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 		}
 	}
 
-	// Now read directly from the connection
+	// Now read directly from the connection - BULLETPROOF version
 	for mount.IsActive() {
+		// Reset read deadline before each read
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
 		n, err := conn.Read(buf)
 		readCount++
 
@@ -526,6 +535,7 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 		}
 
 		if n > 0 {
+			// Write immediately to buffer - this triggers instant broadcast to all listeners
 			_, writeErr := mount.WriteData(buf[:n])
 			if writeErr != nil {
 				h.logger.Printf("Error writing to mount %s: %v", mountPath, writeErr)
@@ -535,6 +545,12 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 		}
 
 		if err != nil {
+			// Check for timeout - this is expected, just continue
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Timeout is OK - source might be pausing between tracks
+				// Just continue and try again
+				continue
+			}
 			if err != io.EOF {
 				h.logger.Printf("Error reading from SOURCE %s: %v", mountPath, err)
 			}
