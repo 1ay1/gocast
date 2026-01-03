@@ -64,12 +64,38 @@ const MountsPage = {
    */
   async refresh() {
     try {
-      const config = await API.getConfig();
+      // Get both config and live status to merge data
+      const [config, status] = await Promise.all([
+        API.getConfig(),
+        API.getStatus().catch(() => ({ mounts: [] })),
+      ]);
+
+      // Create a map of live mount data for quick lookup
+      const liveData = {};
+      (status.mounts || []).forEach((m) => {
+        liveData[m.path] = m;
+      });
+
+      // Merge config with live data
       this._mounts = Object.entries(config.mounts || {}).map(
-        ([path, mount]) => ({
-          path,
-          ...mount,
-        })
+        ([path, mount]) => {
+          const live = liveData[path] || {};
+          return {
+            path,
+            ...mount,
+            // Override with live data when available
+            active: live.active || false,
+            listeners: live.listeners || 0,
+            peak: live.peak || 0,
+            // Store both config and live bitrate for comparison
+            configBitrate: mount.bitrate || 128,
+            // Use live bitrate if active, otherwise use configured
+            bitrate: live.active && live.bitrate ? live.bitrate : mount.bitrate,
+            // Use live name/genre if available
+            liveName: live.name || null,
+            liveGenre: live.genre || null,
+          };
+        },
       );
       this.renderMounts();
     } catch (err) {
@@ -131,14 +157,21 @@ const MountsPage = {
     const maxListeners = mount.max_listeners || 100;
     const bitrate = mount.bitrate || 128;
     const isPublic = mount.public !== false;
+    const isActive = mount.active || false;
+    const listeners = mount.listeners || 0;
+    // Check if bitrate is from live source or config
+    const isLiveBitrate = isActive && mount.bitrate !== mount.configBitrate;
 
     return `
             <tr>
-                <td class="mono">${UI.escapeHtml(path)}</td>
-                <td>${UI.escapeHtml(name)}</td>
+                <td class="mono">
+                    ${UI.escapeHtml(path)}
+                    ${isActive ? '<span style="margin-left: 6px;">🔴</span>' : ""}
+                </td>
+                <td>${UI.escapeHtml(mount.liveName || name)}</td>
                 <td>${UI.escapeHtml(this.formatContentType(type))}</td>
-                <td>${maxListeners}</td>
-                <td>${bitrate} kbps</td>
+                <td>${isActive ? `${listeners} / ${maxListeners}` : maxListeners}</td>
+                <td>${bitrate} kbps${isLiveBitrate ? ' <span title="From live source" style="opacity:0.6">📡</span>' : ""}</td>
                 <td>${isPublic ? UI.badge("Public", "success") : UI.badge("Private", "neutral")}</td>
                 <td>
                     <div class="flex gap-1">
@@ -276,6 +309,7 @@ const MountsPage = {
                            class="form-input"
                            placeholder="128"
                            value="${mount.bitrate || 128}">
+                    <span class="form-hint">Default for directory listings. Actual bitrate is set by source client.</span>
                 </div>
             </div>
 
@@ -353,9 +387,7 @@ const MountsPage = {
     const isEdit = !!this._editingMount;
 
     // Get form values
-    const path = isEdit
-      ? this._editingMount
-      : UI.$("mountPath").value.trim();
+    const path = isEdit ? this._editingMount : UI.$("mountPath").value.trim();
     const name = UI.$("mountName").value.trim();
     const genre = UI.$("mountGenre").value.trim();
     const type = UI.$("mountType").value;
@@ -427,7 +459,7 @@ const MountsPage = {
         title: "Delete Mount",
         confirmText: "Delete",
         danger: true,
-      }
+      },
     );
 
     if (confirmed) {

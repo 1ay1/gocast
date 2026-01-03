@@ -145,6 +145,9 @@ func NewWithConfigManager(cm *config.ConfigManager, logger *log.Logger) *Server 
 		s.mountManager.SetConfig(newCfg)
 
 		s.logger.Println("Configuration updated and propagated to all handlers")
+		if s.logBuffer != nil {
+			s.logBuffer.AddInfo("Config", "Configuration updated and propagated to all handlers")
+		}
 	})
 
 	// Clean up expired tokens periodically

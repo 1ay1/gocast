@@ -746,32 +746,76 @@ func (s *Server) handleGetMountConfig(w http.ResponseWriter, r *http.Request, mo
 
 // handleUpdateMountConfig updates an existing mount
 func (s *Server) handleUpdateMountConfig(w http.ResponseWriter, r *http.Request, mountPath string) {
-	var dto MountConfigDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+	// Get existing mount first
+	existingMount := s.configManager.GetMount(mountPath)
+	if existingMount == nil {
+		s.jsonError(w, "Mount not found: "+mountPath, http.StatusNotFound)
+		return
+	}
+
+	// Start with existing config values
+	mount := &config.MountConfig{
+		Name:         existingMount.Name,
+		Password:     existingMount.Password,
+		MaxListeners: existingMount.MaxListeners,
+		Genre:        existingMount.Genre,
+		Description:  existingMount.Description,
+		URL:          existingMount.URL,
+		Bitrate:      existingMount.Bitrate,
+		Type:         existingMount.Type,
+		Public:       existingMount.Public,
+		StreamName:   existingMount.StreamName,
+		Hidden:       existingMount.Hidden,
+		BurstSize:    existingMount.BurstSize,
+	}
+
+	// Parse request into a map to check which fields were explicitly provided
+	var rawData map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&rawData); err != nil {
 		s.jsonError(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Get existing mount to preserve password if not provided
-	existingMount := s.configManager.GetMount(mountPath)
-	password := dto.Password
-	if password == "" && existingMount != nil {
-		password = existingMount.Password
+	// Update only fields that were explicitly provided in the request
+	if v, ok := rawData["name"].(string); ok {
+		mount.Name = v
 	}
-
-	mount := &config.MountConfig{
-		Name:         mountPath,
-		Password:     password,
-		MaxListeners: dto.MaxListeners,
-		Genre:        dto.Genre,
-		Description:  dto.Description,
-		URL:          dto.URL,
-		Bitrate:      dto.Bitrate,
-		Type:         dto.Type,
-		Public:       dto.Public,
-		StreamName:   dto.StreamName,
-		Hidden:       dto.Hidden,
-		BurstSize:    dto.BurstSize,
+	if v, ok := rawData["password"].(string); ok && v != "" {
+		mount.Password = v
+	}
+	if v, ok := rawData["max_listeners"].(float64); ok {
+		mount.MaxListeners = int(v)
+	}
+	if v, ok := rawData["genre"].(string); ok {
+		mount.Genre = v
+	}
+	if v, ok := rawData["description"].(string); ok {
+		mount.Description = v
+	}
+	if v, ok := rawData["url"].(string); ok {
+		mount.URL = v
+	}
+	if v, ok := rawData["bitrate"].(float64); ok {
+		mount.Bitrate = int(v)
+	}
+	if v, ok := rawData["type"].(string); ok {
+		mount.Type = v
+	}
+	if v, ok := rawData["public"]; ok {
+		if b, ok := v.(bool); ok {
+			mount.Public = b
+		}
+	}
+	if v, ok := rawData["stream_name"].(string); ok {
+		mount.StreamName = v
+	}
+	if v, ok := rawData["hidden"]; ok {
+		if b, ok := v.(bool); ok {
+			mount.Hidden = b
+		}
+	}
+	if v, ok := rawData["burst_size"].(float64); ok {
+		mount.BurstSize = int(v)
 	}
 
 	if err := s.configManager.UpdateMount(mountPath, mount); err != nil {

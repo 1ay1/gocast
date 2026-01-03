@@ -91,8 +91,7 @@ const DashboardPage = {
                                 <span class="text-muted">Connections</span>
                                 <span id="connValue">0 / 100</span>
                             </div>
-                            ${UI.progressBar(0, "")}
-                            <div id="connProgress"></div>
+                            <div id="connProgress">${UI.progressBar(0, "")}</div>
                         </div>
 
                         <div class="health-item">
@@ -100,8 +99,7 @@ const DashboardPage = {
                                 <span class="text-muted">Sources</span>
                                 <span id="srcValue">0 / 10</span>
                             </div>
-                            ${UI.progressBar(0, "")}
-                            <div id="srcProgress"></div>
+                            <div id="srcProgress">${UI.progressBar(0, "")}</div>
                         </div>
 
                         <div class="health-item">
@@ -109,8 +107,7 @@ const DashboardPage = {
                                 <span class="text-muted">Memory</span>
                                 <span id="memValue">--</span>
                             </div>
-                            ${UI.progressBar(0, "")}
-                            <div id="memProgress"></div>
+                            <div id="memProgress">${UI.progressBar(0, "")}</div>
                         </div>
 
                         <div class="health-item">
@@ -118,8 +115,7 @@ const DashboardPage = {
                                 <span class="text-muted">Buffer Health</span>
                                 <span id="bufValue">100%</span>
                             </div>
-                            ${UI.progressBar(100, "success")}
-                            <div id="bufProgress"></div>
+                            <div id="bufProgress">${UI.progressBar(100, "success")}</div>
                         </div>
                     </div>
                 </div>
