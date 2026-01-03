@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -32,13 +33,15 @@ type ServerConfigDTO struct {
 
 // SSLConfigDTO represents SSL configuration for API
 type SSLConfigDTO struct {
-	Enabled      bool   `json:"enabled"`
-	AutoSSL      bool   `json:"auto_ssl"`
-	AutoSSLEmail string `json:"auto_ssl_email,omitempty"`
-	Port         int    `json:"port"`
-	CertPath     string `json:"cert_path,omitempty"`
-	KeyPath      string `json:"key_path,omitempty"`
-	Hostname     string `json:"hostname,omitempty"`
+	Enabled         bool   `json:"enabled"`
+	AutoSSL         bool   `json:"auto_ssl"`
+	AutoSSLEmail    string `json:"auto_ssl_email,omitempty"`
+	Port            int    `json:"port"`
+	CertPath        string `json:"cert_path,omitempty"`
+	KeyPath         string `json:"key_path,omitempty"`
+	Hostname        string `json:"hostname,omitempty"`
+	DNSProvider     string `json:"dns_provider,omitempty"`
+	CloudflareToken string `json:"cloudflare_token,omitempty"`
 }
 
 // LimitsConfigDTO represents limits configuration for API
@@ -110,23 +113,27 @@ type FullConfigDTO struct {
 func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
-	// Check if config manager is available
-	if s.configManager == nil {
-		s.jsonError(w, "Configuration management not available", http.StatusServiceUnavailable)
+	// Handle CORS preflight requests
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	switch {
 	case path == "/admin/config" && r.Method == http.MethodGet:
 		s.handleGetConfig(w, r)
-	case path == "/admin/config" && r.Method == http.MethodPost:
+	case path == "/admin/config" && r.Method == http.MethodPut:
 		s.handleUpdateConfig(w, r)
+	case path == "/admin/config/reload" && r.Method == http.MethodPost:
+		s.handleReloadConfig(w, r)
 	case path == "/admin/config/reset" && r.Method == http.MethodPost:
 		s.handleResetConfig(w, r)
 	case path == "/admin/config/export" && r.Method == http.MethodGet:
 		s.handleExportConfig(w, r)
-	case path == "/admin/config/reload" && r.Method == http.MethodPost:
-		s.handleReloadConfig(w, r)
 	case path == "/admin/config/server" && r.Method == http.MethodPost:
 		s.handleUpdateServerConfig(w, r)
 	case path == "/admin/config/ssl" && r.Method == http.MethodGet:
@@ -137,6 +144,16 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		s.handleEnableAutoSSL(w, r)
 	case path == "/admin/config/ssl/disable" && r.Method == http.MethodPost:
 		s.handleDisableSSL(w, r)
+	case path == "/admin/config/ssl/status" && r.Method == http.MethodGet:
+		s.handleSSLStatus(w, r)
+	case path == "/admin/config/ssl/prepare" && r.Method == http.MethodPost:
+		s.handlePrepareDNS(w, r)
+	case path == "/admin/config/ssl/verify" && r.Method == http.MethodPost:
+		s.handleVerifyDNS(w, r)
+	case path == "/admin/config/ssl/obtain" && r.Method == http.MethodPost:
+		s.handleObtainCertificate(w, r)
+	case path == "/admin/config/ssl/reset" && r.Method == http.MethodPost:
+		s.handleResetSSL(w, r)
 	case path == "/admin/config/limits" && r.Method == http.MethodPost:
 		s.handleUpdateLimitsConfig(w, r)
 	case path == "/admin/config/limits" && r.Method == http.MethodGet:
@@ -168,13 +185,15 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			AdminRoot:     cfg.Server.AdminRoot,
 		},
 		SSL: SSLConfigDTO{
-			Enabled:      cfg.SSL.Enabled,
-			AutoSSL:      cfg.SSL.AutoSSL,
-			AutoSSLEmail: cfg.SSL.AutoSSLEmail,
-			Port:         cfg.SSL.Port,
-			CertPath:     cfg.SSL.CertPath,
-			KeyPath:      cfg.SSL.KeyPath,
-			Hostname:     cfg.Server.Hostname,
+			Enabled:         cfg.SSL.Enabled,
+			AutoSSL:         cfg.SSL.AutoSSL,
+			AutoSSLEmail:    cfg.SSL.AutoSSLEmail,
+			Port:            cfg.SSL.Port,
+			CertPath:        cfg.SSL.CertPath,
+			KeyPath:         cfg.SSL.KeyPath,
+			Hostname:        cfg.Server.Hostname,
+			DNSProvider:     cfg.SSL.DNSProvider,
+			CloudflareToken: maskToken(cfg.SSL.CloudflareToken),
 		},
 		Limits: LimitsConfigDTO{
 			MaxClients:           cfg.Limits.MaxClients,
@@ -393,8 +412,10 @@ func (s *Server) handleUpdateSSLConfig(w http.ResponseWriter, r *http.Request) {
 // handleEnableAutoSSL enables automatic SSL with Let's Encrypt
 func (s *Server) handleEnableAutoSSL(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Hostname string `json:"hostname"`
-		Email    string `json:"email"`
+		Hostname        string `json:"hostname"`
+		Email           string `json:"email"`
+		DNSProvider     string `json:"dns_provider"`
+		CloudflareToken string `json:"cloudflare_token"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -407,14 +428,20 @@ func (s *Server) handleEnableAutoSSL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.configManager.EnableAutoSSL(req.Hostname, req.Email); err != nil {
+	// Validate Cloudflare token if using Cloudflare provider
+	if req.DNSProvider == "cloudflare" && req.CloudflareToken == "" {
+		s.jsonError(w, "Cloudflare API token is required when using Cloudflare DNS provider", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.configManager.EnableAutoSSLWithDNS(req.Hostname, req.Email, req.DNSProvider, req.CloudflareToken); err != nil {
 		s.jsonError(w, "Failed to enable AutoSSL: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
-		Message: "AutoSSL enabled. Changes applied immediately.",
+		Message: "AutoSSL enabled. Restart the server to obtain your certificate.",
 	})
 }
 
@@ -428,6 +455,129 @@ func (s *Server) handleDisableSSL(w http.ResponseWriter, r *http.Request) {
 	s.jsonResponse(w, ConfigAPIResponse{
 		Success: true,
 		Message: "SSL disabled. Changes applied immediately.",
+	})
+}
+
+// handleSSLStatus returns the current SSL/certificate status
+func (s *Server) handleSSLStatus(w http.ResponseWriter, r *http.Request) {
+	if s.autoSSL == nil {
+		s.jsonResponse(w, map[string]interface{}{
+			"enabled":     s.config.SSL.Enabled,
+			"auto_ssl":    s.config.SSL.AutoSSL,
+			"status":      "disabled",
+			"message":     "AutoSSL is not active",
+			"has_manager": false,
+		})
+		return
+	}
+
+	status := s.autoSSL.GetStatus()
+	s.jsonResponse(w, map[string]interface{}{
+		"enabled":       s.config.SSL.Enabled,
+		"auto_ssl":      s.config.SSL.AutoSSL,
+		"status":        status.Status,
+		"message":       status.Message,
+		"fqdn":          status.FQDN,
+		"txt_value":     status.TXTValue,
+		"dns_verified":  status.DNSVerified,
+		"certificate":   status.CertificateInfo,
+		"error":         status.Error,
+		"next_step":     status.NextStep,
+		"has_manager":   true,
+		"dns_provider":  s.config.SSL.DNSProvider,
+		"https_running": s.IsHTTPSRunning(),
+		"https_port":    s.sslPort,
+	})
+}
+
+// handlePrepareDNS generates the DNS challenge and shows user what TXT record to add
+// Step 1: User calls this to get the TXT record value
+func (s *Server) handlePrepareDNS(w http.ResponseWriter, r *http.Request) {
+	if s.autoSSL == nil {
+		s.jsonError(w, "AutoSSL is not configured. Enable AutoSSL first and restart the server.", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.autoSSL.PrepareDNSChallenge(); err != nil {
+		s.jsonError(w, "Failed to prepare DNS challenge: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	status := s.autoSSL.GetStatus()
+	s.jsonResponse(w, map[string]interface{}{
+		"success":   true,
+		"message":   "DNS challenge prepared. Add the TXT record shown below.",
+		"status":    status.Status,
+		"fqdn":      status.FQDN,
+		"txt_value": status.TXTValue,
+		"next_step": status.NextStep,
+	})
+}
+
+// handleVerifyDNS checks if the DNS record has propagated
+// Step 2: User calls this after adding the TXT record
+func (s *Server) handleVerifyDNS(w http.ResponseWriter, r *http.Request) {
+	if s.autoSSL == nil {
+		s.jsonError(w, "AutoSSL is not configured", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.autoSSL.VerifyDNSRecord(); err != nil {
+		s.jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.jsonResponse(w, ConfigAPIResponse{
+		Success: true,
+		Message: "DNS record verified! You can now obtain the certificate.",
+	})
+}
+
+// handleObtainCertificate completes the certificate flow
+// Step 3: User calls this after DNS is verified
+func (s *Server) handleObtainCertificate(w http.ResponseWriter, r *http.Request) {
+	if s.autoSSL == nil {
+		s.jsonError(w, "AutoSSL is not configured. Enable AutoSSL first and restart the server.", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	if err := s.autoSSL.ObtainCertificate(ctx); err != nil {
+		s.jsonError(w, "Failed to obtain certificate: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Auto-start HTTPS server now that we have a certificate
+	var message string
+	if err := s.startHTTPSDynamic(); err != nil {
+		s.logger.Printf("[AutoSSL] Warning: Could not auto-start HTTPS: %v", err)
+		message = "Certificate obtained successfully! Please restart the server to enable HTTPS."
+	} else {
+		message = fmt.Sprintf("Certificate obtained and HTTPS is now active on port %d! No restart needed.", s.sslPort)
+		// Start renewal loop
+		s.autoSSL.StartRenewalLoop(context.Background())
+	}
+
+	s.jsonResponse(w, ConfigAPIResponse{
+		Success: true,
+		Message: message,
+	})
+}
+
+// handleResetSSL resets the SSL state to start fresh
+func (s *Server) handleResetSSL(w http.ResponseWriter, r *http.Request) {
+	if s.autoSSL == nil {
+		s.jsonError(w, "AutoSSL is not configured", http.StatusBadRequest)
+		return
+	}
+
+	s.autoSSL.Reset()
+
+	s.jsonResponse(w, ConfigAPIResponse{
+		Success: true,
+		Message: "SSL state reset. You can start the process again.",
 	})
 }
 
@@ -845,6 +995,9 @@ func (s *Server) handleDeleteMountConfig(w http.ResponseWriter, r *http.Request,
 // jsonResponse writes a JSON response
 func (s *Server) jsonResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 	json.NewEncoder(w).Encode(data)
 }
 
@@ -859,6 +1012,9 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, data interface{}) {
 // jsonError writes an error JSON response
 func (s *Server) jsonError(w http.ResponseWriter, message string, status int) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(ConfigAPIResponse{
 		Success: false,
@@ -886,4 +1042,13 @@ func parseBoolParam(r *http.Request, name string, defaultValue bool) bool {
 		return defaultValue
 	}
 	return val == "true" || val == "1" || val == "yes"
+}
+
+// maskToken masks a sensitive token for display (shows it exists without revealing value)
+func maskToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	// Return a placeholder to indicate a token is set
+	return "••••••••"
 }

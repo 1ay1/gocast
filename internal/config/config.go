@@ -69,6 +69,14 @@ type SSLConfig struct {
 	CertPath     string `json:"cert_path,omitempty"`
 	KeyPath      string `json:"key_path,omitempty"`
 	CacheDir     string `json:"cache_dir,omitempty"`
+
+	// DNS-01 challenge configuration for AutoSSL
+	// DNSProvider can be "manual" (default) or "cloudflare"
+	DNSProvider string `json:"dns_provider,omitempty"`
+
+	// Cloudflare settings (required if DNSProvider is "cloudflare")
+	CloudflareToken  string `json:"cloudflare_token,omitempty"`
+	CloudflareZoneID string `json:"cloudflare_zone_id,omitempty"`
 }
 
 // LimitsConfig contains resource limits

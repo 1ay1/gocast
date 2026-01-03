@@ -659,6 +659,11 @@ func (cm *ConfigManager) UpdateSSL(enabled, autoSSL *bool, port *int, email, cer
 
 // EnableAutoSSL enables automatic SSL with Let's Encrypt (applies immediately)
 func (cm *ConfigManager) EnableAutoSSL(hostname, email string) error {
+	return cm.EnableAutoSSLWithDNS(hostname, email, "manual", "")
+}
+
+// EnableAutoSSLWithDNS enables automatic SSL with DNS-01 challenge support
+func (cm *ConfigManager) EnableAutoSSLWithDNS(hostname, email, dnsProvider, cloudflareToken string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -668,6 +673,17 @@ func (cm *ConfigManager) EnableAutoSSL(hostname, email string) error {
 	cm.config.SSL.Port = 8443
 	cm.config.SSL.AutoSSLEmail = email
 	cm.config.SSL.CacheDir = filepath.Join(cm.dataDir, "certs")
+
+	// Set DNS provider settings
+	if dnsProvider != "" {
+		cm.config.SSL.DNSProvider = dnsProvider
+	} else {
+		cm.config.SSL.DNSProvider = "manual"
+	}
+
+	if cloudflareToken != "" {
+		cm.config.SSL.CloudflareToken = cloudflareToken
+	}
 
 	if err := cm.saveUnlocked(); err != nil {
 		return err

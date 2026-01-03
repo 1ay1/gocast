@@ -49,6 +49,13 @@ type Server struct {
 	// Log and activity buffers for admin panel
 	logBuffer      *LogBuffer
 	activityBuffer *ActivityBuffer
+	// Main handler for dynamic HTTPS startup
+	mainHandler http.Handler
+	// SSL port for dynamic HTTPS startup
+	sslPort int
+	// Flag to track if HTTPS is running
+	httpsRunning   bool
+	httpsRunningMu sync.RWMutex
 }
 
 // generateToken creates a secure random token
@@ -267,12 +274,20 @@ func (s *Server) Start() error {
 	// Create main router
 	mux := s.createRouter()
 
+	// Store main handler for potential dynamic use
+	s.mainHandler = mux
+
 	// Check if AutoSSL is enabled
 	if s.config.SSL.AutoSSL {
 		return s.startWithAutoSSL(mux)
 	}
 
-	// Create HTTP server
+	// Check if manual SSL is enabled
+	if s.config.SSL.Enabled {
+		return s.startWithManualSSL(mux)
+	}
+
+	// No SSL - just start HTTP server
 	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.Server.Port)
 	s.httpServer = &http.Server{
 		Addr:              addr,
@@ -285,69 +300,252 @@ func (s *Server) Start() error {
 
 	// Start HTTP server
 	go func() {
-		s.logger.Printf("Starting GoCast HTTP server on %s", addr)
+		s.logger.Printf("[GoCast] HTTP server listening on %s", addr)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			s.logger.Printf("HTTP server error: %v", err)
+			s.logger.Printf("[GoCast] HTTP server error: %v", err)
 		}
 	}()
-
-	// Start HTTPS server if enabled
-	if s.config.SSL.Enabled && !s.config.SSL.AutoSSL {
-		if err := s.startHTTPS(mux); err != nil {
-			return fmt.Errorf("failed to start HTTPS server: %w", err)
-		}
-	}
 
 	return nil
 }
 
-// startWithAutoSSL starts the server with automatic Let's Encrypt SSL
-func (s *Server) startWithAutoSSL(handler http.Handler) error {
-	s.logger.Printf("AutoSSL enabled for %s", s.config.Server.Hostname)
-
-	// Create AutoSSL manager
-	autoSSL, err := NewAutoSSLManager(
-		s.config.Server.Hostname,
-		s.config.SSL.AutoSSLEmail,
-		s.config.SSL.CacheDir,
-		s.logger,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create AutoSSL manager: %w", err)
-	}
-	s.autoSSL = autoSSL
-
-	// Start HTTP server on port 80 for ACME challenges + redirect to HTTPS
+// startWithManualSSL starts the server with manual SSL certificates
+func (s *Server) startWithManualSSL(handler http.Handler) error {
 	sslPort := s.config.SSL.Port
 	if sslPort == 0 {
 		sslPort = 8443
 	}
-	s.httpChallenge = autoSSL.StartHTTPChallengeServer(sslPort)
+	s.sslPort = sslPort
 
-	// Create HTTPS server with automatic certificates
-	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, sslPort)
-	s.httpsServer = &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		TLSConfig:         autoSSL.TLSConfig(),
+	// Load certificate
+	cert, err := tls.LoadX509KeyPair(s.config.SSL.CertPath, s.config.SSL.KeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to load SSL certificates: %w", err)
+	}
+
+	// Create HTTPS handler with HSTS
+	httpsHandler := s.wrapWithHSTS(handler)
+
+	// Create redirect handler for HTTP -> HTTPS
+	redirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := fmt.Sprintf("https://%s", s.config.Server.Hostname)
+		if sslPort != 443 {
+			target = fmt.Sprintf("https://%s:%d", s.config.Server.Hostname, sslPort)
+		}
+		target += r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	})
+
+	// Start HTTP server (redirects to HTTPS)
+	httpAddr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.Server.Port)
+	s.httpServer = &http.Server{
+		Addr:              httpAddr,
+		Handler:           redirectHandler,
 		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
 		IdleTimeout:       s.config.Limits.ClientTimeout,
 		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {
-		s.logger.Printf("Starting GoCast HTTPS server on %s (AutoSSL)", addr)
-		if err := s.httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			s.logger.Printf("HTTPS server error: %v", err)
+		s.logger.Printf("[GoCast] HTTP server listening on %s (redirects to HTTPS)", httpAddr)
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Printf("[GoCast] HTTP server error: %v", err)
 		}
 	}()
 
-	s.logger.Printf("AutoSSL: Certificates will be automatically obtained and renewed for %s", s.config.Server.Hostname)
+	// Start HTTPS server
+	httpsAddr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, sslPort)
+	s.httpsServer = &http.Server{
+		Addr:    httpsAddr,
+		Handler: httpsHandler,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		},
+		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
+		IdleTimeout:       s.config.Limits.ClientTimeout,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	go func() {
+		s.logger.Printf("[GoCast] HTTPS server listening on %s", httpsAddr)
+		if err := s.httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			s.logger.Printf("[GoCast] HTTPS server error: %v", err)
+		}
+	}()
+
+	s.httpsRunningMu.Lock()
+	s.httpsRunning = true
+	s.httpsRunningMu.Unlock()
+
+	s.logger.Printf("[GoCast] SSL active - HTTPS ready at https://%s:%d", s.config.Server.Hostname, sslPort)
 
 	return nil
 }
 
-// startHTTPS starts the HTTPS server
+// wrapWithHSTS wraps a handler to add HSTS header for HTTPS connections
+func (s *Server) wrapWithHSTS(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Add HSTS header (1 year)
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		handler.ServeHTTP(w, r)
+	})
+}
+
+// startWithAutoSSL starts the server with automatic Let's Encrypt SSL using DNS-01 challenge
+// This is non-blocking - if no certificate exists, the server starts on HTTP only
+// and the admin panel is used to obtain the certificate
+func (s *Server) startWithAutoSSL(handler http.Handler) error {
+	sslPort := s.config.SSL.Port
+	if sslPort == 0 {
+		sslPort = 8443
+	}
+
+	// Store for dynamic HTTPS startup later
+	s.mainHandler = handler
+	s.sslPort = sslPort
+
+	// Determine DNS provider
+	dnsProvider := DNSProviderManual
+	if s.config.SSL.DNSProvider == "cloudflare" {
+		dnsProvider = DNSProviderCloudflare
+	}
+
+	// Create AutoSSL manager with DNS-01 challenge
+	autoSSLConfig := AutoSSLConfig{
+		Hostname:         s.config.Server.Hostname,
+		Email:            s.config.SSL.AutoSSLEmail,
+		CacheDir:         s.config.SSL.CacheDir,
+		DNSProvider:      dnsProvider,
+		CloudflareToken:  s.config.SSL.CloudflareToken,
+		CloudflareZoneID: s.config.SSL.CloudflareZoneID,
+	}
+
+	autoSSL, err := NewAutoSSLManager(autoSSLConfig, s.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create AutoSSL manager: %w", err)
+	}
+	s.autoSSL = autoSSL
+
+	// Check if we already have a valid certificate
+	hasCert := autoSSL.HasValidCertificate()
+	if hasCert {
+		if err := autoSSL.LoadCachedCertificate(); err != nil {
+			s.logger.Printf("[AutoSSL] Warning: Could not load cached certificate: %v", err)
+			hasCert = false
+		}
+	}
+
+	// Start HTTP server - always needed for admin panel access
+	httpAddr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.Server.Port)
+
+	// HTTP handler that checks dynamically if HTTPS is available
+	// This allows us to start redirecting after certificate is obtained without restart
+	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.httpsRunningMu.RLock()
+		httpsReady := s.httpsRunning
+		s.httpsRunningMu.RUnlock()
+
+		if httpsReady {
+			// Always redirect to HTTPS when it's running
+			target := fmt.Sprintf("https://%s", s.config.Server.Hostname)
+			if s.sslPort != 443 {
+				target = fmt.Sprintf("https://%s:%d", s.config.Server.Hostname, s.sslPort)
+			}
+			target += r.URL.RequestURI()
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+		// Serve the full app on HTTP only when HTTPS is not available
+		s.mainHandler.ServeHTTP(w, r)
+	})
+
+	s.httpServer = &http.Server{
+		Addr:              httpAddr,
+		Handler:           httpHandler,
+		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
+		IdleTimeout:       s.config.Limits.ClientTimeout,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	go func() {
+		s.logger.Printf("[GoCast] HTTP server listening on %s", httpAddr)
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Printf("[GoCast] HTTP server error: %v", err)
+		}
+	}()
+
+	// Start HTTPS server if we have a certificate
+	if hasCert {
+		if err := s.startHTTPSDynamic(); err != nil {
+			s.logger.Printf("[GoCast] Warning: Failed to start HTTPS: %v", err)
+		} else {
+			// Start certificate renewal loop
+			autoSSL.StartRenewalLoop(context.Background())
+		}
+	} else {
+		s.logger.Printf("[GoCast] AutoSSL enabled but no certificate yet")
+		s.logger.Printf("[GoCast] Go to admin panel to obtain certificate: http://%s:%d/admin/", s.config.Server.Hostname, s.config.Server.Port)
+	}
+
+	return nil
+}
+
+// startHTTPSDynamic starts the HTTPS server dynamically after certificate is obtained
+// This can be called without restarting the server
+func (s *Server) startHTTPSDynamic() error {
+	s.httpsRunningMu.Lock()
+	defer s.httpsRunningMu.Unlock()
+
+	if s.httpsRunning {
+		return nil // Already running
+	}
+
+	if s.autoSSL == nil {
+		return fmt.Errorf("AutoSSL manager not initialized")
+	}
+
+	if s.mainHandler == nil {
+		return fmt.Errorf("main handler not initialized")
+	}
+
+	httpsAddr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.sslPort)
+	// Wrap handler with HSTS for HTTPS
+	httpsHandler := s.wrapWithHSTS(s.mainHandler)
+
+	s.httpsServer = &http.Server{
+		Addr:              httpsAddr,
+		Handler:           httpsHandler,
+		TLSConfig:         s.autoSSL.TLSConfig(),
+		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
+		IdleTimeout:       s.config.Limits.ClientTimeout,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	go func() {
+		s.logger.Printf("[GoCast] HTTPS server listening on %s", httpsAddr)
+		if err := s.httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			s.logger.Printf("[GoCast] HTTPS server error: %v", err)
+			s.httpsRunningMu.Lock()
+			s.httpsRunning = false
+			s.httpsRunningMu.Unlock()
+		}
+	}()
+
+	s.httpsRunning = true
+	s.logger.Printf("[GoCast] AutoSSL active - HTTPS ready at https://%s:%d", s.config.Server.Hostname, s.sslPort)
+
+	return nil
+}
+
+// IsHTTPSRunning returns whether the HTTPS server is currently running
+func (s *Server) IsHTTPSRunning() bool {
+	s.httpsRunningMu.RLock()
+	defer s.httpsRunningMu.RUnlock()
+	return s.httpsRunning
+}
+
+// startHTTPS starts the HTTPS server (legacy - now handled by startWithManualSSL)
 func (s *Server) startHTTPS(handler http.Handler) error {
 	cert, err := tls.LoadX509KeyPair(s.config.SSL.CertPath, s.config.SSL.KeyPath)
 	if err != nil {
@@ -502,7 +700,7 @@ func (s *Server) createRouter() http.Handler {
 		}
 
 		// Admin endpoints
-		if strings.HasPrefix(path, "/admin/") {
+		if path == "/admin" || strings.HasPrefix(path, "/admin/") {
 			s.handleAdmin(w, r)
 			return
 		}

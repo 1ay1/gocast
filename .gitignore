@@ -51,3 +51,4 @@ gocast
 gocast-test
 *.exe
 
+gocast_*
