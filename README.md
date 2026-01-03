@@ -13,7 +13,7 @@
 [Getting Started](#-quick-start) •
 [Documentation](docs/) •
 [Configuration](#-configuration) •
-[API Reference](docs/admin-api.md)
+[API Reference](docs/api.md)
 
 </div>
 
@@ -51,6 +51,8 @@
 ```bash
 git clone https://github.com/1ay1/gocast.git && cd gocast && go build -o gocast ./cmd/gocast && ./gocast
 ```
+
+> **Finding your password later:** `cat ~/.gocast/config.json | grep admin_password`
 
 ### What You'll See
 
@@ -165,7 +167,7 @@ If you prefer, you can edit the config file directly:
   "ssl": {
     "enabled": true,
     "auto_ssl": true,
-    "port": 443,
+    "port": 8443,
     "auto_ssl_email": "admin@example.com"
   },
   "limits": {
@@ -279,7 +281,7 @@ curl -u admin:password "http://localhost:8000/admin/killclient?mount=/live&id=UU
 curl -u admin:password "http://localhost:8000/admin/config"
 ```
 
-📖 [Full API Reference →](docs/admin-api.md)
+📖 [Full API Reference →](docs/api.md)
 
 ## 📚 Documentation
 
@@ -287,10 +289,11 @@ curl -u admin:password "http://localhost:8000/admin/config"
 |----------|-------------|
 | [Getting Started](docs/getting-started.md) | Installation and first steps |
 | [Configuration](docs/configuration.md) | Complete config reference |
-| [Streaming Sources](docs/sources.md) | FFmpeg, BUTT, Liquidsoap, etc. |
+| [Admin Panel](docs/admin-panel.md) | Web-based administration |
+| [Sources](docs/sources.md) | FFmpeg, BUTT, Liquidsoap, etc. |
 | [Listeners](docs/listeners.md) | Client compatibility and features |
-| [Admin API](docs/admin-api.md) | REST API documentation |
-| [Architecture](docs/architecture.md) | Internal design and data flow |
+| [SSL/HTTPS](docs/ssl.md) | Securing your streams |
+| [API Reference](docs/api.md) | REST API documentation |
 
 ## 🏗️ Project Structure
 

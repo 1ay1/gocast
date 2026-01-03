@@ -1,158 +1,169 @@
 # Getting Started with GoCast
 
-GoCast is a modern, drop-in replacement for Icecast written in Go. This guide will help you get up and running in minutes.
+This guide will help you get GoCast up and running in minutes.
 
 ## Installation
 
-### From Source
+### Option 1: Download Binary
 
 ```bash
-# Clone the repository
-git clone https://github.com/1ay1/gocast.git
+# Download the latest release
+curl -LO https://github.com/gocast/gocast/releases/latest/download/gocast-linux-amd64
+chmod +x gocast-linux-amd64
+mv gocast-linux-amd64 /usr/local/bin/gocast
+```
+
+### Option 2: Build from Source
+
+```bash
+git clone https://github.com/gocast/gocast.git
 cd gocast
-
-# Build
 go build -o gocast ./cmd/gocast
-
-# Run
-./gocast
 ```
 
-### Using Docker
+### Option 3: Docker
 
 ```bash
-# Build image
-docker build -t gocast .
-
-# Run container
-docker run -p 8000:8000 gocast
+docker run -p 8000:8000 -v gocast-data:/data gocast/gocast
 ```
 
-### Using Docker Compose
+## First Run
 
-```bash
-docker-compose up -d
-```
-
-## Quick Start
-
-### 1. Start the Server
+Simply run GoCast:
 
 ```bash
 ./gocast
 ```
 
-You'll see the GoCast banner and the server will start on port 8000 by default.
+On first start, you'll see:
 
-### 2. Stream Audio (Source)
+```
+╔════════════════════════════════════════════════════════════╗
+║              GOCAST FIRST-RUN SETUP                        ║
+╠════════════════════════════════════════════════════════════╣
+║  Admin Username: admin                                     ║
+║  Admin Password: xK9mP2nQ7vL4    <-- SAVE THIS!           ║
+║                                                            ║
+║  ⚠️  SAVE THIS PASSWORD - IT WON'T BE SHOWN AGAIN!         ║
+╚════════════════════════════════════════════════════════════╝
 
-Use any Icecast-compatible source client:
+GoCast is running on http://localhost:8000
+Admin panel: http://localhost:8000/admin/
+```
 
-#### FFmpeg
+**Important:** Save the admin password! You can also find it later in:
 ```bash
-ffmpeg -re -i your_audio.mp3 -c:a libmp3lame -b:a 128k -f mp3 \
-  icecast://source:hackme@localhost:8000/live
+cat ~/.gocast/config.json | grep admin_password
 ```
 
-#### BUTT (Broadcast Using This Tool)
-1. Open BUTT settings
-2. Server Type: Icecast
-3. Address: `localhost`
-4. Port: `8000`
-5. Password: `hackme`
-6. Mount: `/live`
+## Access the Admin Panel
 
-#### Liquidsoap
-```liquidsoap
-output.icecast(
-  %mp3(bitrate=128),
-  host="localhost",
-  port=8000,
-  password="hackme",
-  mount="/live",
-  source
-)
-```
+Open your browser to: **http://localhost:8000/admin/**
 
-### 3. Listen to the Stream
+Log in with:
+- Username: `admin`
+- Password: (the password shown on first run)
 
-#### Web Browser
-Open `http://localhost:8000/live` in any browser or media player.
+## Connect a Source (Broadcaster)
 
-#### VLC
+Use any Icecast-compatible software to stream audio:
+
+### Using FFmpeg
+
 ```bash
-vlc http://localhost:8000/live
+ffmpeg -re -i music.mp3 \
+  -c:a libmp3lame -b:a 128k \
+  -content_type audio/mpeg \
+  -f mp3 icecast://source:hackme@localhost:8000/live
 ```
 
-#### mpv
-```bash
-mpv http://localhost:8000/live
+### Using Butt (Broadcast Using This Tool)
+
+1. Open Butt
+2. Settings → Main → Server:
+   - Type: Icecast
+   - Address: localhost
+   - Port: 8000
+   - Password: `hackme` (or your source password)
+   - Mount: `/live`
+
+### Using Mixxx
+
+1. Preferences → Live Broadcasting
+2. Type: Icecast 2
+3. Host: localhost
+4. Port: 8000
+5. Mount: /live
+6. Login: source
+7. Password: (your source password)
+
+## Listen to the Stream
+
+Once a source is connected, listeners can tune in:
+
+### Direct URL
+```
+http://localhost:8000/live
 ```
 
-#### curl
-```bash
-curl http://localhost:8000/live -o recording.mp3
-```
+### In VLC
+File → Open Network Stream → `http://localhost:8000/live`
 
-## Default Configuration
+### In Browser
+Most browsers can play the stream directly by visiting the URL.
 
-GoCast comes with sensible defaults:
+## Configuration
 
-| Setting | Default Value |
-|---------|---------------|
-| HTTP Port | 8000 |
-| Source Password | `hackme` |
-| Admin User | `admin` |
-| Admin Password | `hackme` |
-| Max Clients | 100 |
-| Max Sources | 10 |
+All settings are in `~/.gocast/config.json`:
 
-## Web Interfaces
-
-### Status Page
-`http://localhost:8000/` - Shows all active streams and listener counts
-
-### Admin Panel
-`http://localhost:8000/admin/` - Server administration (requires login)
-
-### API Endpoints
-- `http://localhost:8000/status?format=json` - JSON status
-- `http://localhost:8000/status?format=xml` - XML status (Icecast compatible)
-
-## Custom Configuration
-
-Create a `gocast.vibe` file:
-
-```vibe
-server {
-    hostname myradio.example.com
-    port 8000
-}
-
-auth {
-    source_password your_secure_password
-    admin_user admin
-    admin_password your_admin_password
-}
-
-mounts {
-    live {
-        stream_name "My Radio Station"
-        genre "Music"
-        description "24/7 Live Radio"
-        max_listeners 500
+```json
+{
+  "server": {
+    "hostname": "localhost",
+    "port": 8000
+  },
+  "auth": {
+    "source_password": "hackme",
+    "admin_user": "admin",
+    "admin_password": "your-password"
+  },
+  "mounts": {
+    "/live": {
+      "name": "/live",
+      "password": "optional-mount-specific-password",
+      "max_listeners": 100,
+      "bitrate": 128,
+      "type": "audio/mpeg"
     }
+  }
 }
 ```
 
-Run with your config:
+### Change Settings
+
+**Option 1: Admin Panel (Recommended)**
+- Go to http://localhost:8000/admin/
+- Navigate to Settings
+- Changes apply immediately
+
+**Option 2: Edit Config File**
 ```bash
-./gocast -config gocast.vibe
+nano ~/.gocast/config.json
+# After editing, reload without restart:
+kill -HUP $(pgrep gocast)
+```
+
+## Custom Data Directory
+
+By default, GoCast stores data in `~/.gocast/`. To use a different location:
+
+```bash
+./gocast -data /var/lib/gocast
 ```
 
 ## Next Steps
 
-- [Configuration Reference](configuration.md) - Full configuration options
-- [Streaming Guide](streaming.md) - Detailed streaming setup
-- [API Reference](api.md) - REST API documentation
-- [Admin Guide](admin.md) - Server administration
+- [Configuration Reference](configuration.md) - Full config file documentation
+- [Admin Panel Guide](admin-panel.md) - Using the web interface
+- [SSL Setup](ssl.md) - Enable HTTPS with AutoSSL
+- [Sources Guide](sources.md) - Detailed source connection info

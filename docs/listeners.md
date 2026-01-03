@@ -1,305 +1,323 @@
-# Listener Guide
+# Listeners Guide
 
-This document covers how listeners connect to GoCast streams, client compatibility, and advanced features like ICY metadata.
+Listeners are clients that connect to GoCast to receive audio streams. This guide covers how listeners connect and how to optimize the listening experience.
 
 ## Connecting to a Stream
 
-### Basic URL Format
+### Direct URL
+
+The simplest way to listen is via direct URL:
 
 ```
-http://hostname:port/mountpoint
+http://your-server:8000/mount-path
 ```
 
-Example:
+Examples:
+```
+http://localhost:8000/live
+http://radio.example.com:8000/music
+https://radio.example.com:8443/live  (with SSL)
+```
+
+### Supported Players
+
+GoCast works with any player that supports HTTP audio streams:
+
+| Player | Platform | Notes |
+|--------|----------|-------|
+| VLC | All | Excellent compatibility |
+| foobar2000 | Windows | Lightweight option |
+| Clementine | Linux/Mac/Win | Good metadata support |
+| iTunes | Mac/Windows | Works with MP3 streams |
+| Winamp | Windows | Classic player |
+| mpv | All | Command-line player |
+| Browser | All | Most browsers play directly |
+
+### Command Line Players
+
+**mpv:**
+```bash
+mpv http://localhost:8000/live
+```
+
+**ffplay:**
+```bash
+ffplay http://localhost:8000/live
+```
+
+**VLC:**
+```bash
+vlc http://localhost:8000/live
+```
+
+**curl (save to file):**
+```bash
+curl http://localhost:8000/live > stream.mp3
+```
+
+### Browser Playback
+
+Most modern browsers can play streams directly. Simply navigate to:
 ```
 http://localhost:8000/live
 ```
 
-### HTTPS (SSL/TLS)
-
-If SSL is enabled:
-```
-https://hostname:ssl_port/mountpoint
-```
-
-## Compatible Players
-
-GoCast works with any media player that supports HTTP audio streaming.
-
-### Desktop Players
-
-| Player | Command |
-|--------|---------|
-| VLC | `vlc http://localhost:8000/live` |
-| mpv | `mpv http://localhost:8000/live` |
-| ffplay | `ffplay http://localhost:8000/live` |
-| Audacious | Open URL in playlist |
-| Clementine | Add stream URL |
-| foobar2000 | File → Open URL |
-
-### Command Line
-
-```bash
-# Stream with mpv
-mpv http://localhost:8000/live
-
-# Stream with VLC (no GUI)
-cvlc http://localhost:8000/live
-
-# Record stream with curl
-curl http://localhost:8000/live -o recording.mp3
-
-# Record stream with ffmpeg
-ffmpeg -i http://localhost:8000/live -c copy recording.mp3
-```
-
-### Mobile Apps
-
-- **Android**: VLC for Android, Radiodroid, Simple Radio
-- **iOS**: VLC for iOS, TuneIn, Radio Apps
-
-### Web Browsers
-
-HTML5 audio works in modern browsers:
-
+For embedded playback in a webpage:
 ```html
-<audio src="http://localhost:8000/live" controls autoplay></audio>
+<audio controls autoplay>
+  <source src="http://localhost:8000/live" type="audio/mpeg">
+  Your browser does not support audio playback.
+</audio>
 ```
 
-JavaScript example:
+## Stream Metadata
 
-```javascript
-const audio = new Audio('http://localhost:8000/live');
-audio.play();
-```
+GoCast supports ICY metadata, which allows players to display:
 
-## ICY Metadata
-
-ICY (I Can Yell) metadata provides real-time stream information like the current song title.
+- **Stream Title** - Current song/show name
+- **Artist** - Artist name
+- **Album** - Album name
+- **Genre** - Stream genre
+- **Description** - Stream description
 
 ### Requesting Metadata
 
-Add the `Icy-MetaData: 1` header to receive inline metadata:
-
-```bash
-curl -H "Icy-MetaData: 1" http://localhost:8000/live
+Players request metadata by sending the header:
+```
+Icy-MetaData: 1
 ```
 
-### Metadata Format
-
-When metadata is enabled, the server sends:
-- `icy-metaint` header indicating the metadata interval (usually 16000 bytes)
-- Inline metadata blocks every `icy-metaint` bytes
-
-### Response Headers
-
+GoCast responds with:
 ```
-HTTP/1.1 200 OK
-Content-Type: audio/mpeg
-icy-name: My Radio Station
-icy-description: 24/7 Music
-icy-genre: Rock
-icy-url: http://example.com
-icy-br: 128
-icy-pub: 1
 icy-metaint: 16000
 ```
 
-### Parsing Metadata
+This indicates metadata is embedded every 16000 bytes.
 
-Metadata block format:
-1. 1 byte: block size (multiply by 16 for actual length)
-2. N bytes: metadata string (null-padded)
+### Metadata Update
 
-Example metadata content:
-```
-StreamTitle='Pink Floyd - Money';
-```
+Sources can update metadata in real-time. Listeners see updates within seconds.
 
-### JavaScript Metadata Parser
+## Playlist Files
 
-```javascript
-class ICYMetadataReader {
-  constructor(url, metadataCallback) {
-    this.url = url;
-    this.onMetadata = metadataCallback;
-    this.metaInt = 0;
-    this.byteCount = 0;
-  }
+GoCast can serve playlist files for easy one-click listening.
 
-  async connect() {
-    const response = await fetch(this.url, {
-      headers: { 'Icy-MetaData': '1' }
-    });
-    
-    this.metaInt = parseInt(response.headers.get('icy-metaint') || '0');
-    // Process stream...
-  }
-}
-```
+### M3U Playlist
 
-## CORS Support
-
-GoCast includes CORS headers for web-based players:
+Request format: `/mount-path.m3u`
 
 ```
-Access-Control-Allow-Origin: *
-Access-Control-Allow-Methods: GET, OPTIONS
-Access-Control-Allow-Headers: Origin, Accept, Content-Type, Icy-MetaData
-Access-Control-Expose-Headers: icy-metaint, icy-name, icy-description, icy-genre, icy-url, icy-br
+http://localhost:8000/live.m3u
 ```
 
-This allows JavaScript applications to stream directly from GoCast.
+Contents:
+```m3u
+#EXTM3U
+#EXTINF:-1,Live Stream
+http://localhost:8000/live
+```
 
-## Connection Limits
+### PLS Playlist
+
+Request format: `/mount-path.pls`
+
+```
+http://localhost:8000/live.pls
+```
+
+Contents:
+```ini
+[playlist]
+NumberOfEntries=1
+File1=http://localhost:8000/live
+Title1=Live Stream
+Length1=-1
+Version=2
+```
+
+### XSPF Playlist
+
+Request format: `/mount-path.xspf`
+
+```
+http://localhost:8000/live.xspf
+```
+
+## Listener Limits
 
 ### Per-Mount Limits
 
 Each mount can have its own listener limit:
 
-```vibe
-mounts {
-    live {
-        max_listeners 500
+```json
+{
+  "mounts": {
+    "/live": {
+      "max_listeners": 100
     }
+  }
 }
+```
+
+When the limit is reached, new listeners receive:
+```
+HTTP 503 Service Unavailable
 ```
 
 ### Global Limits
 
-```vibe
-limits {
-    max_clients 1000
+The server has a global client limit:
+
+```json
+{
+  "limits": {
+    "max_clients": 100,
+    "max_listeners_per_mount": 100
+  }
 }
 ```
 
-### Listen Duration Limits
+## Connection Behavior
 
-Limit how long a listener can stay connected:
+### Burst on Connect
 
-```vibe
-mounts {
-    live {
-        max_listener_duration 3600  # 1 hour
+When a listener connects, GoCast sends a "burst" of buffered data immediately. This reduces initial buffering time.
+
+Configure burst size per-mount:
+```json
+{
+  "mounts": {
+    "/live": {
+      "burst_size": 65536
     }
+  }
 }
 ```
 
-## IP-Based Access Control
+### Client Timeout
 
-### Whitelist (Allow Only)
+Idle listeners are disconnected after the timeout period:
 
-```vibe
-mounts {
-    private {
-        allowed_ips [
-            192.168.1.*
-            10.0.0.*
-        ]
+```json
+{
+  "limits": {
+    "client_timeout": 30
+  }
+}
+```
+
+### Buffering
+
+GoCast buffers audio data to handle network fluctuations:
+
+```json
+{
+  "limits": {
+    "queue_size": 131072
+  }
+}
+```
+
+Larger buffers = more tolerance for slow connections, but more memory usage.
+
+## CORS (Cross-Origin Requests)
+
+GoCast allows cross-origin requests by default, enabling browser-based players on different domains.
+
+Response headers:
+```
+Access-Control-Allow-Origin: *
+```
+
+## Status Page
+
+View current listeners and stream status:
+
+```
+http://localhost:8000/status
+```
+
+Formats available:
+- HTML: `http://localhost:8000/status` (default)
+- JSON: `http://localhost:8000/status` (Accept: application/json)
+- XML: `http://localhost:8000/status` (Accept: text/xml)
+
+### JSON Status Example
+
+```json
+{
+  "server_id": "GoCast",
+  "version": "1.0.0",
+  "uptime": 3600,
+  "mounts": [
+    {
+      "path": "/live",
+      "active": true,
+      "listeners": 42,
+      "peak": 100,
+      "name": "My Radio",
+      "genre": "Various",
+      "bitrate": 128
     }
+  ]
 }
 ```
 
-### Blacklist (Deny)
+## Managing Listeners
 
-```vibe
-mounts {
-    live {
-        denied_ips [
-            123.45.67.89
-            spam.example.com
-        ]
-    }
-}
-```
+### Via Admin Panel
 
-## Burst Buffer
+1. Go to **Listeners** page
+2. View all connected listeners
+3. Click **Kick** to disconnect a listener
+4. Use **Move** to move listeners to another mount
 
-When a listener connects, they receive a "burst" of recent audio data to minimize buffering delay.
+### Via API
 
-```vibe
-limits {
-    burst_size 65535  # 64KB burst
-}
-```
-
-Per-mount override:
-
-```vibe
-mounts {
-    live {
-        burst_size 131072  # 128KB burst for this mount
-    }
-}
-```
-
-## Fallback Mounts
-
-When a source disconnects, listeners can be redirected to a fallback mount:
-
-```vibe
-mounts {
-    live {
-        fallback /fallback
-    }
-    
-    fallback {
-        stream_name "Fallback Stream"
-        hidden true
-    }
-}
-```
-
-## Monitoring Listeners
-
-### Status API
-
+**List listeners:**
 ```bash
-# Get listener count
-curl -s http://localhost:8000/status?format=json | jq '.icestats.source[].listeners'
+curl -u admin:password http://localhost:8000/admin/listclients?mount=/live
 ```
 
-### Admin API
-
-List all listeners on a mount:
-
+**Kick a listener:**
 ```bash
-curl -u admin:hackme http://localhost:8000/admin/listclients?mount=/live
-```
-
-### Kick a Listener
-
-```bash
-curl -u admin:hackme "http://localhost:8000/admin/killclient?mount=/live&id=LISTENER_ID"
+curl -u admin:password -X POST \
+  "http://localhost:8000/admin/killclient?mount=/live&id=LISTENER_ID"
 ```
 
 ## Troubleshooting
 
-### "Stream not available"
+### Can't Connect
 
-- No source is currently streaming
-- Check if source is connected: `curl http://localhost:8000/status?format=json`
+1. Check server is running: `curl http://localhost:8000/`
+2. Verify mount exists and has active source
+3. Check listener limits aren't reached
+4. Verify firewall allows connections
 
-### Buffering Issues
+### Buffering / Stuttering
 
-- Increase `burst_size` for faster initial playback
-- Check network bandwidth
-- Reduce stream bitrate
-
-### Connection Refused
-
-- Server not running
-- Firewall blocking port 8000
-- Wrong hostname/port
+- Increase `queue_size` in config
+- Use a lower bitrate stream
+- Check network connectivity
+- Try a wired connection
 
 ### No Audio
 
+- Verify source is streaming (check admin panel)
 - Check player volume
-- Verify stream format is supported by player
-- Try a different player (VLC, mpv)
+- Try a different player
+- Verify stream format is supported
 
-### Metadata Not Showing
+### Wrong Metadata
 
-- Player must support ICY metadata
-- Ensure `Icy-MetaData: 1` header is sent
-- Check `icy-metaint` response header
+- Metadata updates may take a few seconds
+- Check source is sending metadata
+- Some players cache old metadata
+
+## Best Practices
+
+1. **Use playlists** - Provide .m3u links for easy access
+2. **Monitor limits** - Watch listener counts in admin panel
+3. **Appropriate bitrate** - Balance quality vs. bandwidth
+4. **Provide fallback** - Consider a "no source" message
+5. **Test on multiple players** - Ensure broad compatibility

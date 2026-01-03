@@ -1,270 +1,222 @@
-# GoCast Configuration Reference
+# Configuration Reference
 
-GoCast uses the [VIBE](https://github.com/1ay1/vibe) configuration format - a human-friendly format with minimal syntax. Configuration files use the `.vibe` extension.
+GoCast uses a single JSON configuration file for all settings. By default, this file is located at:
 
-## Configuration File Location
-
-By default, GoCast looks for `gocast.vibe` in the current directory. You can specify a different location:
-
-```bash
-./gocast -config /etc/gocast/gocast.vibe
 ```
+~/.gocast/config.json
+```
+
+## File Location
+
+| Flag | Location |
+|------|----------|
+| Default | `~/.gocast/config.json` |
+| Custom | `./gocast -data /path/to/dir` → `/path/to/dir/config.json` |
 
 ## Complete Configuration Example
 
-```vibe
-# GoCast Configuration File
-
-server {
-    hostname localhost
-    listen 0.0.0.0
-    port 8000
-    ssl_port 8443
-    location "Earth"
-    server_id GoCast
-    admin_root /admin
-
-    ssl {
-        enabled false
-        cert /etc/gocast/server.crt
-        key /etc/gocast/server.key
+```json
+{
+  "version": 1,
+  "setup_complete": true,
+  "server": {
+    "hostname": "radio.example.com",
+    "listen_address": "0.0.0.0",
+    "port": 8000,
+    "admin_root": "/admin",
+    "location": "New York, USA",
+    "server_id": "My Radio Server"
+  },
+  "limits": {
+    "max_clients": 100,
+    "max_sources": 10,
+    "max_listeners_per_mount": 100,
+    "queue_size": 131072,
+    "burst_size": 2048,
+    "client_timeout": 30,
+    "header_timeout": 5,
+    "source_timeout": 5
+  },
+  "auth": {
+    "source_password": "broadcast-password",
+    "admin_user": "admin",
+    "admin_password": "secure-admin-password"
+  },
+  "logging": {
+    "log_level": "info",
+    "access_log": "",
+    "error_log": "",
+    "log_size": 10000
+  },
+  "mounts": {
+    "/live": {
+      "name": "/live",
+      "password": "optional-mount-password",
+      "max_listeners": 100,
+      "genre": "Various",
+      "description": "My Radio Stream",
+      "url": "https://example.com",
+      "bitrate": 128,
+      "type": "audio/mpeg",
+      "public": true,
+      "stream_name": "Live Radio",
+      "burst_size": 65536
     }
-}
-
-auth {
-    source_password hackme
-    relay_password ""
-    admin_user admin
-    admin_password hackme
-}
-
-limits {
-    max_clients 100
-    max_sources 10
-    max_listeners_per_mount 100
-    queue_size 524288
-    burst_size 65535
-    client_timeout 30
-    header_timeout 15
-    source_timeout 10
-}
-
-logging {
-    access_log /var/log/gocast/access.log
-    error_log /var/log/gocast/error.log
-    level info
-    log_size 10000
-}
-
-admin {
-    enabled true
-    user admin
-    password hackme
-}
-
-directory {
-    enabled false
-    yp_urls [
-        http://dir.xiph.org/cgi-bin/yp-cgi
-    ]
-    interval 600
-}
-
-mounts {
-    live {
-        password secret123
-        max_listeners 100
-        fallback /fallback
-        stream_name "Live Stream"
-        genre "Various"
-        description "Live broadcast"
-        url "http://example.com"
-        bitrate 128
-        type audio/mpeg
-        public true
-        hidden false
-        burst_size 65535
-        max_listener_duration 0
-    }
+  },
+  "admin": {
+    "enabled": true
+  },
+  "directory": {
+    "enabled": false,
+    "yp_urls": [],
+    "interval": 600
+  },
+  "ssl": {
+    "enabled": false,
+    "port": 8443,
+    "auto_ssl": false,
+    "auto_ssl_email": "",
+    "cert_path": "",
+    "key_path": ""
+  }
 }
 ```
 
 ## Configuration Sections
 
-### server
+### Server
 
-Server-level settings for the GoCast instance.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `hostname` | string | `"localhost"` | Public hostname of the server |
+| `listen_address` | string | `"0.0.0.0"` | IP address to bind to |
+| `port` | int | `8000` | HTTP port |
+| `admin_root` | string | `"/admin"` | URL path for admin panel |
+| `location` | string | `"Earth"` | Server location (displayed in status) |
+| `server_id` | string | `"GoCast"` | Server identifier |
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `hostname` | string | `localhost` | Public hostname of the server |
-| `listen` | string | `0.0.0.0` | IP address to bind to |
-| `port` | integer | `8000` | HTTP port for streaming |
-| `ssl_port` | integer | `8443` | HTTPS port (when SSL enabled) |
-| `location` | string | `Earth` | Server location description |
-| `server_id` | string | `GoCast` | Server identifier in responses |
-| `admin_root` | string | `/admin` | URL path for admin interface |
+### Limits
 
-#### server.ssl
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_clients` | int | `100` | Maximum total connections |
+| `max_sources` | int | `10` | Maximum simultaneous source connections |
+| `max_listeners_per_mount` | int | `100` | Maximum listeners per mount point |
+| `queue_size` | int | `131072` | Buffer size in bytes (128KB) |
+| `burst_size` | int | `2048` | Initial burst data for new listeners |
+| `client_timeout` | int | `30` | Client timeout in seconds |
+| `header_timeout` | int | `5` | HTTP header read timeout |
+| `source_timeout` | int | `5` | Source connection timeout |
 
-SSL/TLS configuration for HTTPS streaming.
+### Auth
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable HTTPS |
-| `cert` | string | - | Path to SSL certificate file |
-| `key` | string | - | Path to SSL private key file |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source_password` | string | (generated) | Global password for source connections |
+| `admin_user` | string | `"admin"` | Admin panel username |
+| `admin_password` | string | (generated) | Admin panel password |
 
-### auth
+### Logging
 
-Authentication credentials for sources and administration.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `log_level` | string | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
+| `access_log` | string | `""` | Path to access log file (empty = stdout) |
+| `error_log` | string | `""` | Path to error log file (empty = stderr) |
+| `log_size` | int | `10000` | Max log entries to keep in memory |
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `source_password` | string | `hackme` | Default password for source clients |
-| `relay_password` | string | `""` | Password for relay connections |
-| `admin_user` | string | `admin` | Admin interface username |
-| `admin_password` | string | `hackme` | Admin interface password |
+### Mounts
 
-### limits
+Each mount is keyed by its path (e.g., `/live`):
 
-Resource limits and timeouts.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | (path) | Mount point name |
+| `password` | string | `""` | Mount-specific source password (optional) |
+| `max_listeners` | int | `100` | Max listeners for this mount |
+| `genre` | string | `""` | Stream genre |
+| `description` | string | `""` | Stream description |
+| `url` | string | `""` | Associated website URL |
+| `bitrate` | int | `128` | Stream bitrate in kbps |
+| `type` | string | `"audio/mpeg"` | Content type (MIME) |
+| `public` | bool | `true` | List in public directories |
+| `stream_name` | string | `""` | Display name for the stream |
+| `burst_size` | int | `65536` | Burst size for this mount |
+| `hidden` | bool | `false` | Hide from status page |
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `max_clients` | integer | `100` | Maximum total connected clients |
-| `max_sources` | integer | `10` | Maximum source connections |
-| `max_listeners_per_mount` | integer | `100` | Maximum listeners per mount point |
-| `queue_size` | integer | `524288` | Stream buffer size in bytes (512KB) |
-| `burst_size` | integer | `65535` | Initial burst size for new listeners (64KB) |
-| `client_timeout` | integer | `30` | Listener timeout in seconds |
-| `header_timeout` | integer | `15` | HTTP header read timeout in seconds |
-| `source_timeout` | integer | `10` | Source connection timeout in seconds |
+### Admin
 
-### logging
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable/disable admin panel |
 
-Logging configuration.
+### Directory
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `access_log` | string | `/var/log/gocast/access.log` | Access log file path |
-| `error_log` | string | `/var/log/gocast/error.log` | Error log file path |
-| `level` | string | `info` | Log level: `debug`, `info`, `warn`, `error` |
-| `log_size` | integer | `10000` | Maximum log entries to keep |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable YP directory listings |
+| `yp_urls` | array | `[]` | YP server URLs |
+| `interval` | int | `600` | Update interval in seconds |
 
-### admin
+### SSL
 
-Admin interface settings.
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `enabled` | boolean | `true` | Enable admin interface |
-| `user` | string | `admin` | Admin username |
-| `password` | string | `hackme` | Admin password |
-
-### directory
-
-Directory/YP (Yellow Pages) listing settings.
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable directory listings |
-| `yp_urls` | array | `[]` | List of YP server URLs |
-| `interval` | integer | `600` | Update interval in seconds |
-
-### mounts
-
-Mount point configurations. Each mount is defined as a named object.
-
-```vibe
-mounts {
-    mountname {
-        # mount settings
-    }
-}
-```
-
-The mount name becomes the URL path (e.g., `mountname` → `/mountname`).
-
-#### Mount Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `password` | string | (global) | Mount-specific source password |
-| `max_listeners` | integer | `100` | Maximum listeners for this mount |
-| `fallback` | string | - | Fallback mount when source disconnects |
-| `stream_name` | string | (mount name) | Stream display name |
-| `genre` | string | - | Stream genre |
-| `description` | string | - | Stream description |
-| `url` | string | - | Associated website URL |
-| `bitrate` | integer | `128` | Stream bitrate in kbps |
-| `type` | string | `audio/mpeg` | Content-Type (MIME type) |
-| `public` | boolean | `true` | List in public directories |
-| `hidden` | boolean | `false` | Hide from status page |
-| `burst_size` | integer | (global) | Burst size for this mount |
-| `max_listener_duration` | integer | `0` | Max listen time in seconds (0=unlimited) |
-| `allowed_ips` | array | `[]` | IP whitelist (supports wildcards) |
-| `denied_ips` | array | `[]` | IP blacklist (supports wildcards) |
-| `dump_file` | string | - | Record stream to file |
-
-## Content Types
-
-Common content types for streaming:
-
-| Format | Content-Type |
-|--------|--------------|
-| MP3 | `audio/mpeg` |
-| Ogg Vorbis | `application/ogg` or `audio/ogg` |
-| Ogg Opus | `audio/ogg; codecs=opus` |
-| AAC | `audio/aac` or `audio/aacp` |
-| FLAC | `audio/flac` |
-| WebM | `audio/webm` |
-
-## IP Filtering
-
-Use wildcards for IP ranges:
-
-```vibe
-mounts {
-    private {
-        allowed_ips [
-            192.168.1.*
-            10.0.0.*
-            127.0.0.1
-        ]
-        denied_ips [
-            192.168.1.100
-        ]
-    }
-}
-```
-
-## Environment-Specific Configs
-
-Create separate config files for different environments:
-
-```bash
-# Development
-./gocast -config gocast.dev.vibe
-
-# Production
-./gocast -config gocast.prod.vibe
-```
-
-## Validating Configuration
-
-Check your configuration without starting the server:
-
-```bash
-./gocast -check -config gocast.vibe
-```
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable HTTPS |
+| `port` | int | `8443` | HTTPS port |
+| `auto_ssl` | bool | `false` | Use Let's Encrypt AutoSSL |
+| `auto_ssl_email` | string | `""` | Email for Let's Encrypt notifications |
+| `cert_path` | string | `""` | Path to SSL certificate (manual mode) |
+| `key_path` | string | `""` | Path to SSL private key (manual mode) |
 
 ## Hot Reload
 
-Send SIGHUP to reload configuration:
+Most configuration changes apply immediately without restart. To reload after editing the file manually:
 
 ```bash
+# Option 1: Send SIGHUP signal
 kill -HUP $(pgrep gocast)
+
+# Option 2: Use admin panel
+# Settings → Reload from Disk
 ```
 
-Note: Some settings require a full restart to take effect.
+## Backup & Recovery
+
+GoCast automatically:
+- Creates a backup before each save (`config.json.backup`)
+- Backs up corrupted configs (`config.json.corrupted.TIMESTAMP`)
+- Recovers from backup if main config is corrupted
+- Validates and auto-fixes invalid values
+
+## Finding Your Password
+
+If you forgot your admin password:
+
+```bash
+cat ~/.gocast/config.json | grep admin_password
+```
+
+Or view the full auth section:
+
+```bash
+cat ~/.gocast/config.json | grep -A3 '"auth"'
+```
+
+## Validation
+
+GoCast validates configuration on load and automatically fixes invalid values:
+
+| Field | Invalid Value | Auto-Fixed To |
+|-------|---------------|---------------|
+| `port` | ≤0 or >65535 | 8000 |
+| `ssl.port` | ≤0 or >65535 | 8443 |
+| `max_clients` | ≤0 | 100 |
+| `max_clients` | >100000 | 100000 |
+| `max_sources` | ≤0 | 10 |
+| `queue_size` | <1024 | 1024 |
+| `queue_size` | >10MB | 10MB |
+| `log_level` | invalid | "info" |
+| `admin_user` | empty | "admin" |
+| `admin_password` | empty | (generated) |
+| `source_password` | empty | (generated) |

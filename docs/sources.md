@@ -1,124 +1,194 @@
-# Streaming Sources
+# Sources Guide
 
-This guide covers how to connect source clients to GoCast. GoCast is compatible with any Icecast-compatible source client.
-
-## Supported Protocols
-
-GoCast supports two methods for source connections:
-
-1. **HTTP PUT** - Modern method used by most clients
-2. **SOURCE** - Legacy Icecast method (deprecated but supported)
+Sources (also called "broadcasters" or "encoders") are clients that send audio to GoCast. This guide covers connecting various software to your GoCast server.
 
 ## Authentication
 
-Sources authenticate using HTTP Basic Authentication:
+Sources authenticate using HTTP Basic Auth:
 
-- **Username**: `source` (or leave empty)
-- **Password**: Your source password (default: `hackme`)
+| Field | Value |
+|-------|-------|
+| Username | `source` (or empty) |
+| Password | Source password or mount-specific password |
+
+### Password Priority
+
+1. **Mount-specific password** - If set in mount config, use this
+2. **Global source password** - Fallback if no mount password
+3. **Admin credentials** - Admin user/pass also works for sources
+
+Find your passwords:
+```bash
+cat ~/.gocast/config.json | grep -E "(source_password|password)"
+```
+
+## Connection URL Format
+
+```
+icecast://[username]:[password]@[host]:[port]/[mount]
+```
+
+Example:
+```
+icecast://source:hackme@localhost:8000/live
+```
+
+## Supported Formats
+
+| Format | MIME Type | Extension |
+|--------|-----------|-----------|
+| MP3 | `audio/mpeg` | .mp3 |
+| Ogg Vorbis | `audio/ogg` | .ogg |
+| Ogg Opus | `audio/ogg; codecs=opus` | .opus |
+| AAC | `audio/aac` | .aac |
+| FLAC | `audio/flac` | .flac |
 
 ## FFmpeg
 
-FFmpeg is a versatile tool for streaming audio and video.
+FFmpeg is the most versatile tool for streaming to GoCast.
 
-### Basic MP3 Stream
-
-```bash
-ffmpeg -re -i input.mp3 -c:a libmp3lame -b:a 128k -f mp3 \
-  icecast://source:hackme@localhost:8000/live
-```
-
-### High Quality MP3 (320kbps)
+### Stream MP3
 
 ```bash
-ffmpeg -re -i input.flac -c:a libmp3lame -b:a 320k -f mp3 \
-  icecast://source:hackme@localhost:8000/live
-```
-
-### Ogg Vorbis Stream
-
-```bash
-ffmpeg -re -i input.mp3 -c:a libvorbis -b:a 192k -f ogg \
-  icecast://source:hackme@localhost:8000/live
-```
-
-### Ogg Opus Stream
-
-```bash
-ffmpeg -re -i input.mp3 -c:a libopus -b:a 128k -f ogg \
-  icecast://source:hackme@localhost:8000/live
-```
-
-### Stream with Metadata
-
-```bash
-ffmpeg -re -i input.mp3 -c:a libmp3lame -b:a 128k -f mp3 \
-  -ice_name "My Radio" \
-  -ice_description "Best music 24/7" \
-  -ice_genre "Pop" \
-  -ice_url "http://myradio.com" \
+ffmpeg -re -i input.mp3 \
+  -c:a libmp3lame -b:a 128k \
+  -f mp3 \
+  -content_type audio/mpeg \
   icecast://source:hackme@localhost:8000/live
 ```
 
 ### Stream from Microphone (Linux)
 
 ```bash
-ffmpeg -f pulse -i default -c:a libmp3lame -b:a 128k -f mp3 \
+ffmpeg -f pulse -i default \
+  -c:a libmp3lame -b:a 128k \
+  -f mp3 \
   icecast://source:hackme@localhost:8000/live
 ```
 
 ### Stream from Microphone (macOS)
 
 ```bash
-ffmpeg -f avfoundation -i ":0" -c:a libmp3lame -b:a 128k -f mp3 \
+ffmpeg -f avfoundation -i ":0" \
+  -c:a libmp3lame -b:a 128k \
+  -f mp3 \
   icecast://source:hackme@localhost:8000/live
 ```
 
-### Continuous Playlist Loop
+### Stream Opus (Better Quality at Low Bitrates)
 
 ```bash
-# Create a playlist file (playlist.txt):
-# file 'song1.mp3'
-# file 'song2.mp3'
-# file 'song3.mp3'
-
-ffmpeg -re -f concat -safe 0 -stream_loop -1 -i playlist.txt \
-  -c:a libmp3lame -b:a 128k -f mp3 \
+ffmpeg -re -i input.mp3 \
+  -c:a libopus -b:a 64k \
+  -f ogg \
+  -content_type "audio/ogg" \
   icecast://source:hackme@localhost:8000/live
 ```
 
-## BUTT (Broadcast Using This Tool)
+### Stream Playlist
 
-BUTT is a popular GUI application for live streaming.
+```bash
+ffmpeg -re -f concat -safe 0 -i playlist.txt \
+  -c:a libmp3lame -b:a 128k \
+  -f mp3 \
+  icecast://source:hackme@localhost:8000/live
+```
+
+`playlist.txt`:
+```
+file '/path/to/song1.mp3'
+file '/path/to/song2.mp3'
+file '/path/to/song3.mp3'
+```
+
+### Stream with Metadata
+
+```bash
+ffmpeg -re -i input.mp3 \
+  -c:a libmp3lame -b:a 128k \
+  -metadata title="My Stream" \
+  -metadata artist="DJ Name" \
+  -f mp3 \
+  -ice_name "My Radio" \
+  -ice_description "The best music" \
+  -ice_genre "Various" \
+  icecast://source:hackme@localhost:8000/live
+```
+
+## Butt (Broadcast Using This Tool)
+
+Butt is a free, cross-platform streaming tool with a simple GUI.
+
+**Download:** https://danielnoethen.de/butt/
 
 ### Configuration
 
-1. Open BUTT and go to **Settings**
-2. Click **ADD** under Server Settings
-3. Configure:
-   - **Type**: Icecast
-   - **Address**: `localhost` (or your server hostname)
-   - **Port**: `8000`
-   - **Password**: `hackme`
-   - **Icecast mountpoint**: `/live`
-   - **Icecast user**: `source`
-4. Click **Save**
-5. Select your audio input device
-6. Click **Play** to start streaming
+1. **Settings → Main → Server → Add**
+2. Fill in:
+   - Name: `My GoCast Server`
+   - Type: `Icecast`
+   - Address: `localhost`
+   - Port: `8000`
+   - Password: `hackme` (your source password)
+   - Mount: `/live`
+   - Icecast User: `source`
 
-### Recommended Settings
+3. **Settings → Audio**
+   - Codec: MP3 or Ogg/Opus
+   - Bitrate: 128 kbps (or your preference)
 
-- **Codec**: MP3 or Ogg Vorbis
-- **Bitrate**: 128-320 kbps
-- **Samplerate**: 44100 Hz
-- **Channels**: Stereo
+4. Click **Play** to start broadcasting
+
+## Mixxx
+
+Mixxx is a free DJ software with built-in broadcasting.
+
+**Download:** https://mixxx.org/
+
+### Configuration
+
+1. **Preferences → Live Broadcasting**
+2. Enable: ✓ Enable Live Broadcasting
+3. Connection:
+   - Type: `Icecast 2`
+   - Host: `localhost`
+   - Port: `8000`
+   - Mount: `/live`
+   - Login: `source`
+   - Password: `hackme`
+
+4. Stream:
+   - Format: MP3 or Ogg Vorbis
+   - Bitrate: 128 kbps
+
+5. Click **Connect** in the main window
+
+## OBS Studio
+
+OBS can stream audio (and video) to GoCast.
+
+### Audio-Only Streaming
+
+1. **Settings → Output → Recording**
+   - Type: Custom Output (FFmpeg)
+   - FFmpeg Output Type: Output to URL
+   - URL: `icecast://source:hackme@localhost:8000/live`
+   - Container Format: mp3
+   - Audio Encoder: libmp3lame
+   - Audio Bitrate: 128 kbps
+
+2. Start Recording (this actually streams)
 
 ## Liquidsoap
 
-Liquidsoap is a powerful audio stream generator.
+Liquidsoap is a powerful audio streaming language.
 
-### Basic Configuration
+### Basic Stream
 
 ```liquidsoap
+# Input from playlist
+source = playlist("/path/to/music")
+
 # Output to GoCast
 output.icecast(
   %mp3(bitrate=128),
@@ -126,187 +196,103 @@ output.icecast(
   port=8000,
   password="hackme",
   mount="/live",
-  name="My Radio",
-  description="Powered by Liquidsoap",
-  genre="Various",
   source
 )
 ```
 
-### Playlist with Jingles
+### With Fallback
 
 ```liquidsoap
-# Music playlist
-music = playlist("/path/to/music")
+# Main live input
+live = input.http("http://your-source:8000/input")
 
-# Jingles every 30 minutes
-jingles = playlist("/path/to/jingles")
-radio = rotate(weights=[1, 29], [jingles, music])
+# Fallback playlist
+playlist = playlist("/path/to/music")
 
-# Output
+# Switch to playlist when live is down
+source = fallback([live, playlist])
+
 output.icecast(
   %mp3(bitrate=128),
   host="localhost",
   port=8000,
   password="hackme",
   mount="/live",
-  radio
+  source
 )
-```
-
-### Live Input with Fallback
-
-```liquidsoap
-# Live input
-live = input.harbor("live", port=8005, password="livepassword")
-
-# Fallback to playlist when no live input
-music = playlist("/path/to/music")
-radio = fallback(track_sensitive=false, [live, music])
-
-# Output
-output.icecast(
-  %mp3(bitrate=128),
-  host="localhost",
-  port=8000,
-  password="hackme",
-  mount="/live",
-  radio
-)
-```
-
-## Mixxx
-
-Mixxx is a free DJ software with built-in streaming support.
-
-### Configuration
-
-1. Open **Preferences** → **Live Broadcasting**
-2. Configure:
-   - **Type**: Icecast 2
-   - **Host**: `localhost`
-   - **Port**: `8000`
-   - **Mount**: `/live`
-   - **Login**: `source`
-   - **Password**: `hackme`
-   - **Stream name**: Your stream name
-3. Select format (MP3/Ogg) and bitrate
-4. Click **Enable Live Broadcasting**
-
-## OBS Studio
-
-OBS can stream audio to GoCast using custom FFmpeg output.
-
-### Configuration
-
-1. Go to **Settings** → **Stream**
-2. Select **Custom...**
-3. Set **Server**: `icecast://source:hackme@localhost:8000/live`
-4. Go to **Settings** → **Output**
-5. Set **Output Mode**: Advanced
-6. Configure audio encoding (MP3 or AAC)
-
-## GStreamer
-
-GStreamer can be used for streaming audio.
-
-### MP3 Stream
-
-```bash
-gst-launch-1.0 filesrc location=input.mp3 ! \
-  decodebin ! audioconvert ! audioresample ! \
-  lamemp3enc bitrate=128 ! \
-  shout2send ip=localhost port=8000 password=hackme mount=/live
-```
-
-### Microphone Stream
-
-```bash
-gst-launch-1.0 pulsesrc ! audioconvert ! audioresample ! \
-  lamemp3enc bitrate=128 ! \
-  shout2send ip=localhost port=8000 password=hackme mount=/live
 ```
 
 ## VLC
 
-VLC can also be used as a streaming source.
+VLC can stream audio to GoCast.
 
-### Stream File
+### GUI Method
+
+1. **Media → Stream**
+2. Add your audio file/source
+3. Click **Stream**
+4. Next → Destinations: Add `Icecast`
+5. Configure:
+   - Address: `localhost`
+   - Port: `8000`
+   - Mount Point: `/live`
+   - Login: `source`
+   - Password: `hackme`
+
+### Command Line
 
 ```bash
 vlc input.mp3 --sout '#transcode{acodec=mp3,ab=128}:std{access=shout,mux=mp3,dst=source:hackme@localhost:8000/live}'
-```
-
-### Stream Playlist
-
-```bash
-vlc playlist.m3u --loop --sout '#transcode{acodec=mp3,ab=128}:std{access=shout,mux=mp3,dst=source:hackme@localhost:8000/live}'
-```
-
-## ices
-
-ices is a lightweight source client for Icecast servers.
-
-### Configuration (ices.xml)
-
-```xml
-<?xml version="1.0"?>
-<ices>
-  <stream>
-    <name>My Radio</name>
-    <genre>Various</genre>
-    <description>Streaming with ices</description>
-  </stream>
-  <server>
-    <hostname>localhost</hostname>
-    <port>8000</port>
-    <password>hackme</password>
-    <mount>/live</mount>
-  </server>
-  <playlist>
-    <file>/path/to/playlist.txt</file>
-    <randomize>1</randomize>
-  </playlist>
-</ices>
 ```
 
 ## Troubleshooting
 
 ### Connection Refused
 
-- Check that GoCast is running: `curl http://localhost:8000/`
-- Verify the port is correct
-- Check firewall settings
+```
+Connection refused
+```
+
+- Check GoCast is running: `pgrep gocast`
+- Verify port: `curl http://localhost:8000/`
+- Check firewall rules
 
 ### Authentication Failed
 
-- Verify password matches `source_password` in config
-- Username should be `source` or empty
-- Check for mount-specific passwords
+```
+401 Unauthorized
+```
 
-### Stream Disconnects
+- Verify password in config: `cat ~/.gocast/config.json | grep password`
+- Try using admin credentials
+- Check mount-specific password if set
 
-- Check source timeout settings
-- Ensure stable network connection
-- Monitor server logs for errors
+### Mount Already in Use
 
-### No Audio
+```
+409 Conflict - Source already connected
+```
 
-- Verify audio format is supported
-- Check bitrate settings
-- Confirm source is sending data: check server logs
+Another source is already streaming to this mount. Either:
+- Disconnect the existing source (Admin Panel → Streams → Disconnect)
+- Use a different mount point
 
-### Buffer Underruns
+### Stream Cuts Out
 
-- Increase `queue_size` in configuration
-- Reduce bitrate
+- Increase `source_timeout` in config
 - Check network stability
+- Use a wired connection instead of WiFi
+
+### No Audio / Silent Stream
+
+- Verify your audio source is working
+- Check FFmpeg/encoder logs for errors
+- Try a test file known to work
 
 ## Best Practices
 
-1. **Use appropriate bitrate**: 128-192 kbps for music, 64-96 kbps for speech
-2. **Set metadata**: Include stream name, genre, and description
-3. **Monitor the stream**: Watch server logs for issues
-4. **Test before going live**: Verify stream works with a test listener
-5. **Use stable network**: Wired connections are more reliable than WiFi
-6. **Implement fallback**: Use Liquidsoap or similar for automatic fallback
+1. **Use appropriate bitrate** - 128kbps for music, 64kbps for speech
+2. **Test locally first** - Stream to localhost before remote
+3. **Monitor the connection** - Watch for reconnections/errors
+4. **Use Opus for low bandwidth** - Better quality than MP3 at low bitrates
+5. **Set metadata** - Helps listeners identify your stream

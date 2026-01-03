@@ -1,55 +1,82 @@
 # GoCast Documentation
 
-Welcome to the GoCast documentation. GoCast is a modern, drop-in replacement for Icecast written in Go.
+GoCast is a modern, high-performance audio streaming server written in Go. It's designed as a drop-in replacement for Icecast with a focus on simplicity and ease of use.
 
-## Table of Contents
+## Quick Start
 
-- [Getting Started](getting-started.md) - Installation and quick start guide
-- [Configuration](configuration.md) - Complete configuration reference
-- [Streaming Sources](sources.md) - How to connect source clients (FFmpeg, BUTT, Liquidsoap, etc.)
-- [Listeners](listeners.md) - Listener connections and client compatibility
-- [Admin API](admin-api.md) - Administration endpoints and management
-- [Architecture](architecture.md) - Internal architecture and design
-- [VIBE Config Format](vibe.md) - VIBE configuration format documentation
-- [Roadmap](roadmap.md) - Planned features and implementation status
+```bash
+# Download and run
+./gocast
 
-## Overview
+# First run shows admin credentials:
+#   Admin Username: admin
+#   Admin Password: <generated>
+#
+# Open http://localhost:8000/admin/ to configure
+```
 
-GoCast is designed to be a modern replacement for Icecast with the following goals:
+## Documentation
 
-- **Full Icecast Compatibility** - Works with existing source clients and listeners
-- **Modern Codebase** - Written in Go for performance and safety
-- **Simple Configuration** - Uses the human-friendly VIBE config format
-- **Easy Deployment** - Single binary, Docker support, minimal dependencies
-
-## Quick Links
-
-| Resource | Description |
+| Document | Description |
 |----------|-------------|
-| [GitHub Repository](https://github.com/1ay1/gocast) | Source code and issues |
-| [Configuration Example](../gocast.vibe) | Sample configuration file |
-| [Dockerfile](../Dockerfile) | Docker container build |
+| [Getting Started](getting-started.md) | Installation and first steps |
+| [Configuration](configuration.md) | Config file reference |
+| [Admin Panel](admin-panel.md) | Web-based administration |
+| [Sources](sources.md) | Connecting broadcasting software |
+| [Listeners](listeners.md) | Client connections and playback |
+| [SSL/HTTPS](ssl.md) | Securing your streams |
+| [API Reference](api.md) | Admin REST API |
 
-## Features
+## Key Features
 
-### Streaming
-- Multiple mount points
-- MP3, Ogg Vorbis, Opus, AAC, FLAC support
-- ICY metadata (now playing info)
-- Configurable buffer and burst sizes
+- **Zero Configuration** - Works out of the box with sensible defaults
+- **Web Admin Panel** - Configure everything from your browser
+- **Hot Reload** - Most settings apply immediately without restart
+- **Auto Recovery** - Corrupted config? Automatic backup and recovery
+- **Icecast Compatible** - Works with existing streaming software
+- **Modern Security** - AutoSSL with Let's Encrypt, secure defaults
 
-### Security
-- Source authentication
-- Admin authentication
-- IP-based access control
-- SSL/TLS support
+## Architecture
 
-### Monitoring
-- Real-time statistics
-- JSON/XML status API (Icecast compatible)
-- Web-based admin interface
-- Listener tracking
+```
+┌─────────────────────────────────────────────────────────┐
+│                      GoCast Server                       │
+├─────────────────────────────────────────────────────────┤
+│                                                          │
+│   ┌──────────┐    ┌──────────┐    ┌──────────────────┐  │
+│   │  Source  │───▶│  Mount   │───▶│    Listeners     │  │
+│   │ (ffmpeg) │    │  (/live) │    │ (browsers/apps)  │  │
+│   └──────────┘    └──────────┘    └──────────────────┘  │
+│                                                          │
+│   ┌──────────────────────────────────────────────────┐  │
+│   │              Admin Panel (/admin/)                │  │
+│   │  • Settings    • Mounts    • Listeners    • Logs │  │
+│   └──────────────────────────────────────────────────┘  │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
 
-## License
+## Configuration
 
-GoCast is released under the MIT License.
+All settings are stored in a single JSON file:
+
+```
+~/.gocast/config.json
+```
+
+You can:
+1. **Edit via Admin Panel** (recommended) - Changes apply immediately
+2. **Edit the file directly** - Send SIGHUP to reload
+
+## Default Ports
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 8000 | HTTP | Main server (streams + admin) |
+| 8443 | HTTPS | SSL/TLS (when enabled) |
+| 80 | HTTP | AutoSSL verification (Let's Encrypt) |
+
+## Support
+
+- GitHub: https://github.com/gocast/gocast
+- Issues: https://github.com/gocast/gocast/issues
