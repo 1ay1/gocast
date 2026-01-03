@@ -77,6 +77,7 @@ type Listener struct {
 	ConnectedAt time.Time
 	BytesSent   int64
 	LastActive  time.Time
+	IsBot       bool // True if this is a known bot/preview fetcher
 	done        chan struct{}
 }
 
@@ -88,6 +89,20 @@ func NewListener(ip, userAgent string) *Listener {
 		UserAgent:   userAgent,
 		ConnectedAt: time.Now(),
 		LastActive:  time.Now(),
+		IsBot:       false,
+		done:        make(chan struct{}),
+	}
+}
+
+// NewListenerWithBot creates a new listener with bot flag
+func NewListenerWithBot(ip, userAgent string, isBot bool) *Listener {
+	return &Listener{
+		ID:          uuid.New().String(),
+		IP:          ip,
+		UserAgent:   userAgent,
+		ConnectedAt: time.Now(),
+		LastActive:  time.Now(),
+		IsBot:       isBot,
 		done:        make(chan struct{}),
 	}
 }
@@ -333,6 +348,7 @@ type UniqueListener struct {
 	BytesSent   int64     // Total bytes across all connections
 	LastActive  time.Time // Most recent activity
 	IDs         []string  // All listener IDs for this unique listener
+	IsBot       bool      // True if this is a known bot/preview fetcher
 }
 
 // GetUniqueListeners returns listeners consolidated by IP+UserAgent
@@ -368,6 +384,7 @@ func (m *Mount) GetUniqueListeners() []*UniqueListener {
 				BytesSent:   l.BytesSent,
 				LastActive:  l.LastActive,
 				IDs:         []string{l.ID},
+				IsBot:       l.IsBot,
 			}
 		}
 	}
@@ -379,13 +396,17 @@ func (m *Mount) GetUniqueListeners() []*UniqueListener {
 	return result
 }
 
-// UniqueListenerCount returns the count of unique IP+UserAgent combinations
+// UniqueListenerCount returns the count of unique IP+UserAgent combinations (excluding bots)
 func (m *Mount) UniqueListenerCount() int {
 	m.listenerMu.RLock()
 	defer m.listenerMu.RUnlock()
 
 	unique := make(map[string]struct{})
 	for _, l := range m.listeners {
+		// Skip bots in listener count
+		if l.IsBot {
+			continue
+		}
 		key := l.IP + "|" + l.UserAgent
 		unique[key] = struct{}{}
 	}

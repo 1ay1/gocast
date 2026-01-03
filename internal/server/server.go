@@ -973,8 +973,8 @@ func (s *Server) handleAdminListClients(w http.ResponseWriter, r *http.Request) 
 			connected := int(time.Since(listener.ConnectedAt).Seconds())
 			// Use first ID as the primary, but include all IDs for kick functionality
 			primaryID := listener.IDs[0]
-			sb.WriteString(fmt.Sprintf(`{"id":%q,"ip":%q,"user_agent":%q,"connected":%d,"connections":%d,"ids":%s}`,
-				primaryID, listener.IP, listener.UserAgent, connected, listener.Connections, toJSONStringArray(listener.IDs)))
+			sb.WriteString(fmt.Sprintf(`{"id":%q,"ip":%q,"user_agent":%q,"connected":%d,"bytes_sent":%d,"connections":%d,"is_bot":%t,"ids":%s}`,
+				primaryID, listener.IP, listener.UserAgent, connected, listener.BytesSent, listener.Connections, listener.IsBot, toJSONStringArray(listener.IDs)))
 		}
 
 		sb.WriteString(`],"total":`)

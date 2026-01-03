@@ -50,6 +50,42 @@ const (
 	defaultBitrate = 320000
 )
 
+// botUserAgents contains patterns for known bots/preview fetchers
+// These connections will be tracked but marked as bots
+var botUserAgents = []string{
+	"WhatsApp",
+	"facebookexternalhit",
+	"Facebot",
+	"Twitterbot",
+	"LinkedInBot",
+	"Slackbot",
+	"TelegramBot",
+	"Discordbot",
+	"Googlebot",
+	"bingbot",
+	"YandexBot",
+	"DuckDuckBot",
+	"Baiduspider",
+	"curl",
+	"wget",
+	"python-requests",
+	"Go-http-client",
+	"Apache-HttpClient",
+	"Java/",
+	"okhttp",
+}
+
+// isBotUserAgent checks if the user agent belongs to a known bot/preview fetcher
+func isBotUserAgent(userAgent string) bool {
+	ua := strings.ToLower(userAgent)
+	for _, bot := range botUserAgents {
+		if strings.Contains(ua, strings.ToLower(bot)) {
+			return true
+		}
+	}
+	return false
+}
+
 // ListenerHandler handles listener HTTP requests
 type ListenerHandler struct {
 	mountManager   *stream.MountManager
@@ -109,6 +145,7 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientIP := getClientIP(r)
+	userAgent := r.UserAgent()
 
 	// Get mount
 	mount := h.mountManager.GetMount(mountPath)
@@ -123,8 +160,11 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if we can add listener
-	if !mount.CanAddListener() {
+	// Check if this is a bot/preview request
+	isBot := isBotUserAgent(userAgent)
+
+	// Check if we can add listener (bots don't count toward limit)
+	if !isBot && !mount.CanAddListener() {
 		http.Error(w, "Listener limit reached", http.StatusServiceUnavailable)
 		return
 	}
@@ -135,8 +175,8 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create listener
-	listener := stream.NewListener(clientIP, r.UserAgent())
+	// Create listener with bot flag
+	listener := stream.NewListenerWithBot(clientIP, userAgent, isBot)
 	mount.AddListener(listener)
 	connectTime := time.Now()
 
