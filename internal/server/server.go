@@ -451,56 +451,27 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 			return
 		}
 
-		// NEVER redirect /admin/metadata - Icecast clients don't follow redirects
-		if strings.HasPrefix(path, "/admin/metadata") {
-			s.mainHandler.ServeHTTP(w, r)
-			return
-		}
-
-		// NEVER redirect /admin/listclients - RadioBOSS uses this
-		if strings.HasPrefix(path, "/admin/listclients") {
-			s.mainHandler.ServeHTTP(w, r)
-			return
-		}
-
-		// NEVER redirect /admin/stats - RadioBOSS uses this
-		if strings.HasPrefix(path, "/admin/stats") {
-			s.mainHandler.ServeHTTP(w, r)
-			return
-		}
-
-		// NEVER redirect /status - used by monitoring tools
-		if strings.HasPrefix(path, "/status") {
-			s.mainHandler.ServeHTTP(w, r)
-			return
-		}
-
-		// NEVER redirect stream paths (anything that's not /admin or /)
-		// This is critical for listener compatibility - many players don't follow redirects
-		if !strings.HasPrefix(path, "/admin") && path != "/" {
-			s.mainHandler.ServeHTTP(w, r)
-			return
-		}
-
+		// Simple redirect logic:
+		// - Only redirect /admin and /admin/ (the admin panel web UI) to HTTPS for security
+		// - Everything else stays on HTTP - streams, API endpoints, metadata, stats, etc.
+		// - This is the cleanest approach for Icecast compatibility
+		
 		s.httpsRunningMu.RLock()
 		httpsReady := s.httpsRunning
 		s.httpsRunningMu.RUnlock()
 
-		// Only redirect browser requests (admin panel) to HTTPS
-		if httpsReady && r.Method == http.MethodGet {
-			// Only redirect admin panel and root page
-			if strings.HasPrefix(path, "/admin") || path == "/" {
-				target := fmt.Sprintf("https://%s", s.config.Server.Hostname)
-				if s.sslPort != 443 {
-					target = fmt.Sprintf("https://%s:%d", s.config.Server.Hostname, s.sslPort)
-				}
-				target += r.URL.RequestURI()
-				http.Redirect(w, r, target, http.StatusMovedPermanently)
-				return
+		// Only redirect the admin panel UI itself (not API endpoints)
+		if httpsReady && (path == "/admin" || path == "/admin/") {
+			target := fmt.Sprintf("https://%s", s.config.Server.Hostname)
+			if s.sslPort != 443 {
+				target = fmt.Sprintf("https://%s:%d", s.config.Server.Hostname, s.sslPort)
 			}
+			target += r.URL.RequestURI()
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
 		}
 
-		// Serve on HTTP
+		// Serve everything else on HTTP without redirect
 		s.mainHandler.ServeHTTP(w, r)
 	})
 
