@@ -10,10 +10,6 @@ const DashboardPage = {
     // Previous stats for change detection
     _prevStats: null,
 
-    // Bandwidth tracking - use 10-second moving average to smooth bursty data
-    _bandwidthHistory: [], // [{bytes, time}, ...]
-    _lastDisplayedBandwidth: 0,
-
     /**
      * Render the dashboard page
      */
@@ -167,8 +163,6 @@ const DashboardPage = {
             this._interval = null;
         }
         this._prevStats = null;
-        this._bandwidthHistory = [];
-        this._lastDisplayedBandwidth = 0;
     },
 
     /**
@@ -214,50 +208,20 @@ const DashboardPage = {
         const peakEl = UI.$("peakListeners");
         if (peakEl) peakEl.textContent = peakListeners;
 
-        // Update bandwidth display - use 10-second moving average to smooth bursty data
+        // Update bandwidth display - show expected bandwidth based on bitrate × listeners
+        // This is more meaningful than actual bytes (which depends on client buffering)
         const bandwidthEl = UI.$("totalBandwidth");
         if (bandwidthEl) {
-            const currentBytes = status.total_bytes_sent || 0;
-            const currentTime = Date.now();
-
-            // Add current sample to history
-            this._bandwidthHistory.push({
-                bytes: currentBytes,
-                time: currentTime,
-            });
-
-            // Keep only last 10 seconds of samples
-            const cutoffTime = currentTime - 10000;
-            this._bandwidthHistory = this._bandwidthHistory.filter(
-                (s) => s.time > cutoffTime,
-            );
-
-            // Calculate bandwidth from oldest to newest sample in window
-            let bandwidth = 0;
-            if (this._bandwidthHistory.length >= 2) {
-                const oldest = this._bandwidthHistory[0];
-                const newest =
-                    this._bandwidthHistory[this._bandwidthHistory.length - 1];
-                const bytesDelta = newest.bytes - oldest.bytes;
-                const timeDelta = (newest.time - oldest.time) / 1000;
-                if (bytesDelta > 0 && timeDelta > 0.5) {
-                    bandwidth = bytesDelta / timeDelta;
+            // Calculate expected bandwidth from active mounts
+            let expectedBandwidth = 0;
+            mounts.forEach((mount) => {
+                if (mount.active && mount.listeners > 0) {
+                    // bitrate is in kbps, convert to bytes/sec
+                    const mountBitrate = ((mount.bitrate || 128) * 1000) / 8;
+                    expectedBandwidth += mountBitrate * mount.listeners;
                 }
-            }
-
-            // Update display - use last known value if current is 0 but we have listeners
-            if (bandwidth > 0) {
-                this._lastDisplayedBandwidth = bandwidth;
-                bandwidthEl.textContent = this.formatBandwidth(bandwidth);
-            } else if (totalListeners === 0) {
-                this._lastDisplayedBandwidth = 0;
-                bandwidthEl.textContent = this.formatBandwidth(0);
-            } else if (this._lastDisplayedBandwidth > 0) {
-                // Keep showing last value briefly while data is bursty
-                bandwidthEl.textContent = this.formatBandwidth(
-                    this._lastDisplayedBandwidth,
-                );
-            }
+            });
+            bandwidthEl.textContent = this.formatBandwidth(expectedBandwidth);
         }
 
         const liveCountEl = UI.$("liveCount");
