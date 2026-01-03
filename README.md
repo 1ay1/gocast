@@ -2,18 +2,27 @@
 
 <img src="assets/logo.svg" alt="GoCast" width="400">
 
-### A Modern, Drop-in Replacement for Icecast
+### 🎵 The Modern Audio Streaming Server You've Been Waiting For
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 [![Icecast Compatible](https://img.shields.io/badge/Icecast-Compatible-blue?style=for-the-badge)](https://icecast.org)
+[![Stars](https://img.shields.io/github/stars/1ay1/gocast?style=for-the-badge&logo=github&color=yellow)](https://github.com/1ay1/gocast)
 
-**Stream audio to thousands of listeners with a single binary. No dependencies. No complexity.**
+**🚀 Stream audio to thousands of listeners with a single binary. No dependencies. No complexity. Just works.**
 
-[Getting Started](#-quick-start) •
-[Documentation](docs/) •
-[Configuration](#-configuration) •
-[API Reference](docs/api.md)
+[🎯 Quick Start](#-quick-start) •
+[📖 Documentation](docs/) •
+[⚙️ Configuration](#-configuration) •
+[🔌 API Reference](docs/api.md)
+
+---
+
+### ✨ Beautiful, Powerful Admin Panel
+
+<img src="assets/admin_ss.png" alt="GoCast Admin Panel" width="100%">
+
+*Configure everything from your browser — mounts, SSL, authentication, and more. No restarts needed!*
 
 </div>
 
@@ -21,16 +30,19 @@
 
 ## ⚡ Why GoCast?
 
+> **"Finally, an Icecast replacement that doesn't make me want to cry."** — Every radio operator, probably
+
 | Feature | Icecast | GoCast |
 |---------|---------|--------|
-| Language | C | **Go** |
+| Language | C | **Go** 🦫 |
 | Config Format | XML 😱 | **JSON + Web UI** 🎛️ |
-| Memory Safety | Manual | **Automatic** |
-| Single Binary | ❌ | **✅** |
-| Web Admin Panel | Basic | **Full Featured** |
-| Hot Reload Config | ❌ | **✅** |
-| Docker Ready | Requires setup | **Native** |
+| Memory Safety | Manual | **Automatic** ✅ |
+| Single Binary | ❌ | **✅ Zero Dependencies** |
+| Web Admin Panel | Basic | **Modern & Full Featured** 🔥 |
+| Hot Reload Config | ❌ | **✅ No Restarts** |
+| Docker Ready | Requires setup | **Native** 🐳 |
 | CORS Support | Manual | **Built-in** |
+| Setup Time | Hours | **60 Seconds** ⚡ |
 
 ## ✨ Features
 
@@ -38,21 +50,22 @@
 - 🎧 **Multi-Format Support** - MP3, Ogg Vorbis, Opus, AAC, FLAC, and more
 - 📊 **ICY Metadata** - Real-time "Now Playing" updates to all listeners
 - 🔀 **Multiple Mounts** - Host unlimited streams on a single server
-- 🛡️ **Built-in Security** - Authentication, IP filtering, SSL/TLS
+- 🛡️ **Built-in Security** - Authentication, IP filtering, SSL/TLS with **free AutoSSL**
 - 📈 **Live Statistics** - JSON/XML API compatible with existing tools
-- 🎛️ **Web Admin Panel** - Configure everything from your browser - no restart needed!
+- 🎛️ **Gorgeous Admin Panel** - Configure everything from your browser — no restart needed!
 - 🔄 **Hot Reload** - All settings apply immediately without restart
 - 🐳 **Docker Ready** - Deploy anywhere in seconds
+- 🧠 **Smart Defaults** - Works out of the box, customize when you need to
 
 ## 🚀 Quick Start
 
-### One-liner Install
+### ⚡ One-liner Install (60 seconds to streaming!)
 
 ```bash
 git clone https://github.com/1ay1/gocast.git && cd gocast && go build -o gocast ./cmd/gocast && ./gocast
 ```
 
-> **Finding your password later:** `cat ~/.gocast/config.json | grep admin_password`
+> 💡 **Finding your password later:** `cat ~/.gocast/config.json | grep admin_password`
 
 ### What You'll See
 
@@ -334,11 +347,16 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 <div align="center">
 
+## 💖 Love GoCast? Give us a star!
+
 **⭐ Star this repo if GoCast helps you stream!**
+
+Your support helps us keep building awesome open source software.
 
 Made with ❤️ and Go
 
-[Report Bug](https://github.com/1ay1/gocast/issues) •
-[Request Feature](https://github.com/1ay1/gocast/issues)
+[🐛 Report Bug](https://github.com/1ay1/gocast/issues) •
+[💡 Request Feature](https://github.com/1ay1/gocast/issues) •
+[⭐ Star on GitHub](https://github.com/1ay1/gocast)
 
 </div>
