@@ -385,54 +385,56 @@ func (b *Buffer) WaitForData(pos int64, timeout time.Duration) bool {
 	return b.writePos.Load() > pos
 }
 
-// WaitForDataFast waits for new data with minimal overhead and timeout
-// This is the BULLETPROOF version - instant wakeup via sync.Cond
-// Returns true if data available, false on timeout
+// WaitForDataFast waits for new data with ZERO allocations
+// This is the BULLETPROOF version - minimal latency, no garbage
+// Returns true if data available, false on timeout (100ms max)
 func (b *Buffer) WaitForDataFast(pos int64) bool {
-	// Fast path: data already available
+	// Fast path: data already available (most common case)
 	if b.writePos.Load() > pos {
 		return true
 	}
 
-	// Use a short timeout to allow checking for source disconnect
-	// 10ms is fast enough to be responsive, slow enough to not waste CPU
-	return b.WaitForData(pos, 10*time.Millisecond)
+	// Ultra-simple spin-wait with tiny sleep
+	// NO allocations, NO channels, NO tickers - just raw speed
+	// 100 iterations * 1ms = 100ms max wait
+	for i := 0; i < 100; i++ {
+		time.Sleep(time.Millisecond)
+		if b.writePos.Load() > pos {
+			return true
+		}
+	}
+
+	return b.writePos.Load() > pos
 }
 
-// WaitForDataContext waits for new data, respecting context cancellation
-// This is the MOST BULLETPROOF version - use in streaming loops
-// Returns true if data available, false if context cancelled or timeout
+// WaitForDataContext waits for new data, respecting cancellation
+// BULLETPROOF: Zero allocations in the hot path
+// Returns true if data available, false if cancelled
 func (b *Buffer) WaitForDataContext(pos int64, done <-chan struct{}) bool {
-	// Fast path: data already available
+	// Fast path: data already available (most common case)
 	if b.writePos.Load() > pos {
 		return true
 	}
 
-	// Check if already cancelled
-	select {
-	case <-done:
-		return false
-	default:
-	}
-
-	// Wait with periodic checks for cancellation
-	// This ensures we wake up quickly when data arrives OR when cancelled
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-
+	// Ultra-simple spin-wait: check data, check cancel, sleep tiny bit
+	// NO tickers, NO allocations - just raw polling
+	// This is the fastest possible approach for real-time streaming
 	for {
+		// Check for cancellation (non-blocking)
 		select {
 		case <-done:
 			return false
-		case <-ticker.C:
-			if b.writePos.Load() > pos {
-				return true
-			}
-		case <-b.notify:
-			if b.writePos.Load() > pos {
-				return true
-			}
+		default:
 		}
+
+		// Check for data
+		if b.writePos.Load() > pos {
+			return true
+		}
+
+		// Tiny sleep to prevent CPU spin
+		// 500 microseconds = 0.5ms - fast enough for audio, light on CPU
+		time.Sleep(500 * time.Microsecond)
 	}
 }
 

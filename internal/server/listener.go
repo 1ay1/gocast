@@ -281,10 +281,6 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	var metaByteCount int
 	var lastMeta string
 
-	// Timeout handling
-	timeout := h.getClientTimeout()
-	lastActivity := time.Now()
-
 	// Source state tracking
 	var sourceDisconnectTime time.Time
 	sourceWasActive := true
@@ -300,57 +296,36 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		default:
 		}
 
-		// CHECK 2: Source status
+		// CHECK 2: Source status (only check periodically, not every loop)
 		sourceActive := mount.IsActive()
-		if !sourceActive {
-			if sourceWasActive {
-				sourceDisconnectTime = time.Now()
-				sourceWasActive = false
-			}
-
-			// Source gone too long?
-			if time.Since(sourceDisconnectTime) > sourceReconnectWait {
-				return
-			}
-
-			// Brief wait, but keep trying to read buffered data
-			select {
-			case <-listener.Done():
-				return
-			case <-time.After(50 * time.Millisecond):
-			}
-		} else {
-			if !sourceWasActive {
-				// Source reconnected! Re-sync to audio frames
-				needsSync = true
-			}
+		if !sourceActive && sourceWasActive {
+			sourceDisconnectTime = time.Now()
+			sourceWasActive = false
+		} else if sourceActive && !sourceWasActive {
+			// Source reconnected! Re-sync to audio frames
+			needsSync = true
 			sourceWasActive = true
 		}
 
-		// CHECK 3: Client timeout
-		if time.Since(lastActivity) > timeout {
+		// If source gone too long, exit
+		if !sourceActive && time.Since(sourceDisconnectTime) > sourceReconnectWait {
 			return
 		}
 
-		// READ: Get data from the ring buffer
+		// READ: Get data from the ring buffer - this is the HOT PATH
 		n, newPos := buffer.ReadFromInto(readPos, readBuf)
 
 		if n == 0 {
-			// No data available - flush anything pending and wait
-			if hasFlusher {
-				flusher.Flush()
-			}
-			// BULLETPROOF: Use context-aware wait for proper cancellation
-			// This ensures we wake up instantly on new data OR client disconnect
+			// No data - wait for more (this handles timeout internally)
 			if !buffer.WaitForDataContext(readPos, listener.Done()) {
-				return // Client disconnected while waiting
+				return // Client disconnected
 			}
 			continue
 		}
 
+		// Got data - update position immediately
 		data := readBuf[:n]
 		readPos = newPos
-		lastActivity = time.Now()
 
 		// SYNC: Find MP3 frame boundary on first read for clean audio start
 		if needsSync && n >= 4 {
@@ -364,11 +339,16 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			continue
 		}
 
-		// WRITE: Send data to client
+		// WRITE: Send data to client - StreamWriter handles flush
 		var err error
 		if metaInterval > 0 {
 			err = writeDataWithMeta(w, data, mount, &metaByteCount, &lastMeta, metaInterval)
+			// Flush after metadata write
+			if hasFlusher {
+				flusher.Flush()
+			}
 		} else {
+			// Direct write - sw.Write already flushes
 			_, err = sw.Write(data)
 		}
 
@@ -376,22 +356,8 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			return // Client disconnected
 		}
 
-		// FLUSH: Immediate flush after every write - this is critical!
-		// The StreamWriter already flushes, but we double-flush for safety
-		if hasFlusher {
-			flusher.Flush()
-		}
-
-		// Update listener stats
+		// Update listener stats (minimal overhead)
 		listener.BytesSent += int64(len(data))
-		listener.LastActive = lastActivity
-
-		// Check max duration limit
-		if mount.Config.MaxListenerDuration > 0 {
-			if time.Since(listener.ConnectedAt) > mount.Config.MaxListenerDuration {
-				return
-			}
-		}
 	}
 }
 

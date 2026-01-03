@@ -14,7 +14,6 @@ package server
 import (
 	"bufio"
 	"crypto/tls"
-	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -65,191 +64,79 @@ const (
 // StreamWriter wraps an http.ResponseWriter with bulletproof streaming behavior.
 // It ensures data is delivered immediately to clients without buffering.
 //
-// Key features:
+// OPTIMIZED FOR SPEED:
+// - No mutex in hot path (each listener has its own writer)
 // - Immediate flush after every write
-// - Graceful error handling
-// - Metrics tracking
-// - Connection health monitoring
+// - Minimal overhead
 type StreamWriter struct {
-	w          http.ResponseWriter
-	flusher    http.Flusher
-	conn       net.Conn // Underlying TCP connection (if available)
-	controller responseController
-	mu         sync.Mutex // Protects writes
+	w       http.ResponseWriter
+	flusher http.Flusher
 
-	// Metrics
+	// Metrics (no lock needed - single goroutine access)
 	bytesWritten int64
-	writeCount   int64
-	errorCount   int64
-	lastWrite    time.Time
-
-	// State
-	closed    bool
-	lastError error
-}
-
-// responseController interface for Go 1.20+ ResponseController
-type responseController interface {
-	Flush() error
-	SetWriteDeadline(deadline time.Time) error
+	lastError    error
+	closed       bool
 }
 
 // NewStreamWriter creates a bulletproof stream writer
+// OPTIMIZED: Minimal setup, no allocations beyond the struct
 func NewStreamWriter(w http.ResponseWriter) *StreamWriter {
-	sw := &StreamWriter{
-		w:         w,
-		lastWrite: time.Now(),
-	}
+	sw := &StreamWriter{w: w}
 
 	// Get flusher - essential for streaming
 	if f, ok := w.(http.Flusher); ok {
 		sw.flusher = f
 	}
 
-	// Try to get the underlying connection for TCP optimizations
-	// This works with hijacked connections or when ResponseWriter
-	// implements the optional interfaces
-	if conn := getUnderlyingConn(w); conn != nil {
-		sw.conn = conn
-		optimizeConnForStreaming(conn)
-	}
-
-	// Try to get ResponseController (Go 1.20+)
-	sw.controller = newResponseController(w)
-
 	return sw
 }
 
 // Write writes data to the client and immediately flushes
-// This is the most critical function - it must be fast and reliable
+// BULLETPROOF: No locks, no allocations, just write and flush
 func (sw *StreamWriter) Write(data []byte) (int, error) {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-
-	if sw.closed {
-		return 0, io.ErrClosedPipe
-	}
-
-	if len(data) == 0 {
+	if sw.closed || len(data) == 0 {
 		return 0, nil
 	}
 
-	// Set write deadline if we have a controller
-	if sw.controller != nil {
-		sw.controller.SetWriteDeadline(time.Now().Add(WriteDeadline))
-	}
-
-	// Write the data
+	// Write directly - no locks needed (single goroutine per listener)
 	n, err := sw.w.Write(data)
 
 	if err != nil {
-		sw.errorCount++
-		sw.lastError = err
-		return n, err
-	}
-
-	// Update metrics
-	sw.bytesWritten += int64(n)
-	sw.writeCount++
-	sw.lastWrite = time.Now()
-
-	// CRITICAL: Flush immediately after every write
-	// This is what makes streaming smooth - no buffering!
-	sw.flush()
-
-	return n, nil
-}
-
-// WriteImmediate writes data with maximum priority
-// Use this for critical data that must go out NOW
-func (sw *StreamWriter) WriteImmediate(data []byte) (int, error) {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-
-	if sw.closed {
-		return 0, io.ErrClosedPipe
-	}
-
-	// Set aggressive deadline
-	if sw.controller != nil {
-		sw.controller.SetWriteDeadline(time.Now().Add(FlushDeadline))
-	}
-
-	n, err := sw.w.Write(data)
-	if err != nil {
-		sw.errorCount++
 		sw.lastError = err
 		return n, err
 	}
 
 	sw.bytesWritten += int64(n)
-	sw.writeCount++
-	sw.lastWrite = time.Now()
 
-	// Force flush
-	sw.flush()
+	// CRITICAL: Flush immediately - this is what eliminates lag!
+	if sw.flusher != nil {
+		sw.flusher.Flush()
+	}
 
 	return n, nil
 }
 
-// flush forces data to be sent to the client
-func (sw *StreamWriter) flush() {
-	// Try ResponseController first (most reliable)
-	if sw.controller != nil {
-		sw.controller.Flush()
-		return
-	}
-
-	// Fall back to http.Flusher
+// Flush explicitly flushes pending data
+func (sw *StreamWriter) Flush() {
 	if sw.flusher != nil {
 		sw.flusher.Flush()
 	}
 }
 
-// Flush explicitly flushes pending data
-func (sw *StreamWriter) Flush() {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-	sw.flush()
-}
-
 // Close marks the writer as closed
 func (sw *StreamWriter) Close() error {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
 	sw.closed = true
 	return nil
 }
 
-// Stats returns streaming statistics
-func (sw *StreamWriter) Stats() (bytesWritten, writeCount, errorCount int64) {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-	return sw.bytesWritten, sw.writeCount, sw.errorCount
+// BytesWritten returns total bytes written
+func (sw *StreamWriter) BytesWritten() int64 {
+	return sw.bytesWritten
 }
 
 // LastError returns the last error encountered
 func (sw *StreamWriter) LastError() error {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
 	return sw.lastError
-}
-
-// IsHealthy returns true if the writer is functioning properly
-func (sw *StreamWriter) IsHealthy() bool {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-
-	if sw.closed {
-		return false
-	}
-
-	// If we haven't written in a while but have errors, unhealthy
-	if sw.errorCount > 0 && time.Since(sw.lastWrite) > 5*time.Second {
-		return false
-	}
-
-	return true
 }
 
 // =============================================================================
@@ -287,38 +174,6 @@ func optimizeConnForStreaming(conn net.Conn) {
 	// Large enough to handle bursts, small enough to avoid lag
 	tcpConn.SetWriteBuffer(TCPBufferSize)
 	tcpConn.SetReadBuffer(TCPBufferSize)
-}
-
-// getUnderlyingConn tries to extract the underlying net.Conn from a ResponseWriter
-// NOTE: We cannot use Hijack() here as it would steal the connection from the HTTP handler
-// Instead, we return nil and rely on other optimization methods
-func getUnderlyingConn(w http.ResponseWriter) net.Conn {
-	// We intentionally do NOT hijack the connection here
-	// Hijacking steals the connection from the HTTP handler, breaking streaming
-	// TCP optimizations are applied at the listener level instead
-	return nil
-}
-
-// =============================================================================
-// RESPONSE CONTROLLER WRAPPER
-// =============================================================================
-
-// goResponseController wraps the Go 1.20+ http.ResponseController
-type goResponseController struct {
-	rc *http.ResponseController
-}
-
-func newResponseController(w http.ResponseWriter) responseController {
-	rc := http.NewResponseController(w)
-	return &goResponseController{rc: rc}
-}
-
-func (c *goResponseController) Flush() error {
-	return c.rc.Flush()
-}
-
-func (c *goResponseController) SetWriteDeadline(deadline time.Time) error {
-	return c.rc.SetWriteDeadline(deadline)
 }
 
 // =============================================================================
