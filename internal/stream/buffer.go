@@ -64,7 +64,7 @@ func NewBuffer(size int, burstSize int) *Buffer {
 		size = 2097152 // 2MB = ~52 seconds at 320kbps - bulletproof!
 	}
 	if burstSize <= 0 {
-		burstSize = 65536 // 64KB = ~1.6 seconds at 320kbps - smooth start
+		burstSize = 131072 // 128KB = ~3.2 seconds at 320kbps - bulletproof!
 	}
 
 	// Round up to power of 2 for fast modulo

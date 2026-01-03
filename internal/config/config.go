@@ -171,9 +171,9 @@ func DefaultConfig() *Config {
 			MaxSources:           10,
 			MaxListenersPerMount: 100,
 			QueueSize:            2097152, // 2MB = ~52 seconds at 320kbps - bulletproof!
-			BurstSize:            65536,   // 64KB = ~1.6s burst for smooth listener joins
+			BurstSize:            131072,  // 128KB = ~3.2s burst for bulletproof streaming
 			ClientTimeout:        120 * time.Second,
-			ClientTimeoutSeconds: 30,
+			ClientTimeoutSeconds: 120,
 			HeaderTimeout:        5 * time.Second,
 			HeaderTimeoutSeconds: 5,
 			SourceTimeout:        5 * time.Second,

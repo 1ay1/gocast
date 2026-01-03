@@ -43,8 +43,8 @@ const (
 	defaultClientTimeout = 120 * time.Second
 
 	// defaultBurstSize: Fallback burst size if not in config
-	// 64KB = ~1.6 seconds at 320kbps
-	defaultBurstSize = 65536
+	// 128KB = ~3.2 seconds at 320kbps - bulletproof!
+	defaultBurstSize = 131072
 
 	// defaultBitrate: Fallback bitrate if not in config (bits per second)
 	defaultBitrate = 320000
