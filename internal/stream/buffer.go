@@ -12,6 +12,7 @@
 package stream
 
 import (
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,12 +60,15 @@ type Buffer struct {
 // NewBuffer creates a new stream buffer
 // Size is rounded up to nearest power of 2 for fast modulo operations
 func NewBuffer(size int, burstSize int) *Buffer {
-	// Default sizes optimized for 320kbps streaming - LARGE buffers to prevent any data loss
+	originalSize := size
+	// Default sizes optimized for 320kbps streaming - VERY LARGE buffers to handle slow mobile clients
+	// Mobile devices (especially iOS) can have very slow/throttled connections
+	// A 10MB buffer gives ~4.3 minutes of audio, allowing very slow clients to stay connected
 	if size <= 0 {
-		size = 2097152 // 2MB = ~52 seconds at 320kbps - bulletproof!
+		size = 10485760 // 10MB = ~4.3 minutes at 320kbps - handles very slow connections!
 	}
 	if burstSize <= 0 {
-		burstSize = 131072 // 128KB = ~3.2 seconds at 320kbps - bulletproof!
+		burstSize = 131072 // 128KB = ~3.2 seconds at 320kbps
 	}
 
 	// Round up to power of 2 for fast modulo
@@ -85,6 +89,10 @@ func NewBuffer(size int, burstSize int) *Buffer {
 
 	// Initialize sync.Cond for bulletproof broadcast notifications
 	b.cond = sync.NewCond(&b.condMu)
+
+	// Debug: log buffer creation
+	log.Printf("DEBUG: Buffer created - requested: %d, actual: %d bytes (%.1f seconds at 320kbps), burst: %d bytes",
+		originalSize, size, float64(size)/40000.0, burstSize)
 
 	return b
 }

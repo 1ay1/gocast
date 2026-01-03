@@ -42,6 +42,10 @@ const (
 
 	// defaultBitrate: Fallback bitrate if not in config (bits per second)
 	defaultBitrate = 320000
+
+	// maxLagBytes: Maximum lag before disconnecting slow client
+	// Set to 75% of buffer size (10MB) to disconnect before skipping starts
+	maxLagBytes = 7864320 // 7.5MB = ~3.2 minutes at 320kbps
 )
 
 // botUserAgents contains patterns for known bots/preview fetchers
@@ -183,9 +187,14 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Check for ICY metadata request
 	metadataInterval := 0
-	if r.Header.Get("Icy-MetaData") == "1" {
+	wantsMetadata := r.Header.Get("Icy-MetaData") == "1"
+	if wantsMetadata {
 		metadataInterval = icyMetaInterval
 	}
+
+	// Log listener connection with metadata preference
+	h.logger.Printf("Listener %s connected from %s (ICY metadata: %v, User-Agent: %s)",
+		listener.ID, clientIP, wantsMetadata, userAgent)
 
 	// Set response headers
 	h.setHeaders(w, mount, metadataInterval)
@@ -420,12 +429,22 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			return
 		}
 
+		// Check how far behind we are BEFORE reading
+		// If we're too far behind, disconnect proactively to avoid blocking forever
+		writePos := buffer.WritePos()
+		currentLag := writePos - readPos
+		if currentLag > maxLagBytes {
+			h.logger.Printf("WARNING: Listener %s disconnected (too slow) - lag %d bytes exceeds max %d bytes after %v",
+				listener.ID, currentLag, maxLagBytes, time.Since(startTime).Round(time.Second))
+			return
+		}
+
 		// Read data from buffer using SafeReadFromInto to detect skipped bytes
 		n, newPos, skipped := buffer.SafeReadFromInto(readPos, readBuf)
 		if skipped > 0 {
 			totalSkipped += skipped
-			h.logger.Printf("WARNING: Listener %s skipped %d bytes at iteration %d (readPos: %d, total skipped: %d)",
-				listener.ID, skipped, iterationCount, readPos, totalSkipped)
+			h.logger.Printf("WARNING: Listener %s skipped %d bytes at iteration %d (readPos: %d, writePos: %d, lag: %d, bufSize: %d, total skipped: %d)",
+				listener.ID, skipped, iterationCount, readPos, writePos, currentLag, buffer.Size(), totalSkipped)
 		}
 
 		if n == 0 {
@@ -562,48 +581,81 @@ func writeDataWithMeta(w io.Writer, data []byte, mount *stream.Mount, byteCount 
 	return nil
 }
 
-// writeDataWithMetaSW writes data with ICY metadata using StreamWriter (auto-flushes)
+// writeDataWithMetaSW writes data with ICY metadata using StreamWriter
+// OPTIMIZED: Batches all data and metadata into a single write to reduce flush overhead
 func writeDataWithMetaSW(sw *StreamWriter, data []byte, mount *stream.Mount, byteCount *int, lastMeta *string, interval int) error {
+	if len(data) == 0 {
+		return nil
+	}
+
+	// Pre-calculate how much output we'll need (worst case: metadata block every 16KB)
+	// Max metadata block size is 1 + 16*16 = 257 bytes
+	numMetaBlocks := (len(data) / interval) + 2
+	outputBuf := make([]byte, 0, len(data)+numMetaBlocks*260)
+
 	remaining := data
 
 	for len(remaining) > 0 {
 		bytesUntilMeta := interval - *byteCount
 
 		if bytesUntilMeta <= 0 {
-			// Send metadata block
+			// Add metadata block to output buffer
 			meta := mount.GetMetadata()
 			title := formatTitle(meta.Title, meta.Artist)
 
 			if title != *lastMeta {
-				if err := sendMetaBlockSW(sw, title); err != nil {
-					return err
-				}
+				outputBuf = appendMetaBlock(outputBuf, title)
 				*lastMeta = title
 			} else {
-				// Empty metadata block
-				if _, err := sw.Write([]byte{0}); err != nil {
-					return err
-				}
+				// Empty metadata block (just length byte = 0)
+				outputBuf = append(outputBuf, 0)
 			}
 			*byteCount = 0
 			bytesUntilMeta = interval
 		}
 
-		// Write audio data
+		// Add audio data to output buffer
 		toWrite := len(remaining)
 		if toWrite > bytesUntilMeta {
 			toWrite = bytesUntilMeta
 		}
 
-		n, err := sw.Write(remaining[:toWrite])
-		if err != nil {
-			return err
-		}
-		*byteCount += n
-		remaining = remaining[n:] // Use actual bytes written, not requested
+		outputBuf = append(outputBuf, remaining[:toWrite]...)
+		*byteCount += toWrite
+		remaining = remaining[toWrite:]
 	}
 
-	return nil
+	// Single write + flush for all the batched data
+	_, err := sw.Write(outputBuf)
+	return err
+}
+
+// appendMetaBlock appends an ICY metadata block to the buffer
+func appendMetaBlock(buf []byte, title string) []byte {
+	if title == "" {
+		return append(buf, 0)
+	}
+
+	// Format: StreamTitle='title';
+	metaStr := "StreamTitle='" + escapeMeta(title) + "';"
+
+	// Pad to 16-byte boundary
+	metaLen := len(metaStr)
+	blocks := (metaLen + 15) / 16
+	paddedLen := blocks * 16
+
+	// Append length byte
+	buf = append(buf, byte(blocks))
+
+	// Append metadata string
+	buf = append(buf, metaStr...)
+
+	// Append padding zeros
+	for i := metaLen; i < paddedLen; i++ {
+		buf = append(buf, 0)
+	}
+
+	return buf
 }
 
 // sendMetaBlockSW sends an ICY metadata block through StreamWriter
