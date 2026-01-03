@@ -109,19 +109,20 @@ func (l *Listener) Done() <-chan struct{} {
 
 // Mount represents a stream mount point
 type Mount struct {
-	Path          string
-	Config        *config.MountConfig
-	buffer        *Buffer
-	metadata      *Metadata
-	listeners     map[string]*Listener
-	listenerCount int32
-	sourceActive  bool
-	sourceIP      string
-	sourceID      string
-	startTime     time.Time
-	bytesReceived int64
-	peakListeners int32
-	mu            sync.RWMutex
+	Path                string
+	Config              *config.MountConfig
+	buffer              *Buffer
+	metadata            *Metadata
+	listeners           map[string]*Listener
+	listenerCount       int32
+	sourceActive        bool
+	sourceIP            string
+	sourceID            string
+	startTime           time.Time
+	bytesReceived       int64
+	peakListeners       int32 // Deprecated: raw connection peak
+	peakUniqueListeners int32 // Peak unique listeners (by IP+UserAgent)
+	mu                  sync.RWMutex
 	listenerMu    sync.RWMutex
 	configMu      sync.RWMutex
 	fallbackMount string
@@ -231,15 +232,28 @@ func (m *Mount) AddListener(l *Listener) {
 	defer m.listenerMu.Unlock()
 
 	m.listeners[l.ID] = l
-	newCount := atomic.AddInt32(&m.listenerCount, 1)
+	atomic.AddInt32(&m.listenerCount, 1)
 
-	// Update peak listeners
+	// Update peak unique listeners (count unique IP+UserAgent combinations)
+	m.updatePeakUnique()
+}
+
+// updatePeakUnique updates peak based on current unique listener count
+// Must be called with listenerMu held
+func (m *Mount) updatePeakUnique() {
+	unique := make(map[string]struct{})
+	for _, l := range m.listeners {
+		key := l.IP + "|" + l.UserAgent
+		unique[key] = struct{}{}
+	}
+	uniqueCount := int32(len(unique))
+
 	for {
-		peak := atomic.LoadInt32(&m.peakListeners)
-		if newCount <= peak {
+		peak := atomic.LoadInt32(&m.peakUniqueListeners)
+		if uniqueCount <= peak {
 			break
 		}
-		if atomic.CompareAndSwapInt32(&m.peakListeners, peak, newCount) {
+		if atomic.CompareAndSwapInt32(&m.peakUniqueListeners, peak, uniqueCount) {
 			break
 		}
 	}
@@ -281,9 +295,9 @@ func (m *Mount) ListenerCount() int {
 	return int(atomic.LoadInt32(&m.listenerCount))
 }
 
-// PeakListeners returns the peak listener count
+// PeakListeners returns the peak unique listener count
 func (m *Mount) PeakListeners() int {
-	return int(atomic.LoadInt32(&m.peakListeners))
+	return int(atomic.LoadInt32(&m.peakUniqueListeners))
 }
 
 // GetListeners returns a copy of all listeners
