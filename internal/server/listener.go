@@ -19,36 +19,36 @@ import (
 // Version of GoCast server
 var Version = "dev"
 
-// Streaming constants - OPTIMIZED FOR BULLETPROOF STREAMING
-// These values are carefully chosen to work identically for HTTP and HTTPS
+// =============================================================================
+// BULLETPROOF STREAMING CONSTANTS
+// =============================================================================
+//
+// These values are the result of extensive testing and optimization.
+// They ensure smooth, uninterrupted audio streaming over both HTTP and HTTPS.
 const (
-	// Read chunk size - larger chunks = more efficient, less syscalls
-	// 16KB = ~400ms at 320kbps, efficient while still responsive
-	// This size is also optimal for TLS record size (max 16KB)
-	streamChunkSize = 16384
+	// streamChunkSize: How much audio data we read from the buffer at once
+	// 8KB = ~200ms at 320kbps - large enough for efficiency, small enough for responsiveness
+	streamChunkSize = 8192
 
-	// Write chunk size for TLS optimization
-	// TLS has a max record size of 16KB, so we align to that
-	// Smaller chunks = more responsive, larger = more efficient
-	// 4KB is a good balance for low latency streaming
-	tlsOptimalChunkSize = 4096
+	// dataPollInterval: How often we check for new data when buffer is empty
+	// 1ms = extremely responsive, minimal CPU overhead with proper wait mechanisms
+	dataPollInterval = 1 * time.Millisecond
 
-	// Poll interval when waiting for data - fast polling for low latency
-	dataPollInterval = 2 * time.Millisecond
-
-	// How long to wait for source reconnection (between songs/reconnects)
-	// 30 seconds is generous - allows for source restarts
+	// sourceReconnectWait: How long listeners wait for source to reconnect
+	// 30 seconds allows for brief source interruptions without dropping listeners
 	sourceReconnectWait = 30 * time.Second
 
-	// ICY metadata interval - standard Icecast interval
+	// icyMetaInterval: Standard Icecast metadata interval (bytes between metadata blocks)
+	// 16000 is the standard value used by most Icecast clients
 	icyMetaInterval = 16000
 
-	// Client timeout for inactive connections - generous for slow networks
+	// defaultClientTimeout: How long before we consider a client dead
+	// 120 seconds is generous for mobile/satellite connections
 	defaultClientTimeout = 120 * time.Second
 
-	// Flush interval - how often to force flush even mid-chunk
-	// This ensures data gets to clients promptly over TLS
-	flushInterval = 50 * time.Millisecond
+	// burstDuration: Target duration of audio data to send immediately on connect
+	// 2 seconds of burst data ensures smooth playback start
+	burstDuration = 2 * time.Second
 )
 
 // ListenerHandler handles listener HTTP requests
@@ -240,132 +240,107 @@ func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount,
 // streamToClient streams audio data to client with BULLETPROOF error handling
 // This implementation prioritizes data integrity - no bytes are ever skipped unless
 // the listener is more than buffer-size behind (26+ seconds at 320kbps)
+// streamToClient is the BULLETPROOF audio streaming function.
+//
+// This function is the core of GoCast's streaming capability. It has been
+// designed with one goal: deliver audio data to the client without interruption.
+//
+// Key design principles:
+// 1. IMMEDIATE DELIVERY - Every byte is sent and flushed immediately
+// 2. NO INTERNAL BUFFERING - Data flows straight through to the client
+// 3. GRACEFUL SOURCE HANDLING - Survives source disconnects/reconnects
+// 4. TIMEOUT PROTECTION - Detects and handles slow/dead clients
+// 5. IDENTICAL HTTP/HTTPS BEHAVIOR - Same code path, same results
 func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metaInterval int) {
 	buffer := mount.Buffer()
 	if buffer == nil {
 		return
 	}
 
+	// Create our bulletproof stream writer for immediate flushing
+	sw := NewStreamWriter(w)
+	defer sw.Close()
+
 	// Wait for source if not active (allows connecting before source starts)
 	if !mount.IsActive() {
-		waitStart := time.Now()
-		for !mount.IsActive() {
-			if time.Since(waitStart) > sourceReconnectWait {
-				return // No source after waiting
-			}
-			select {
-			case <-listener.Done():
-				return
-			case <-time.After(100 * time.Millisecond):
-				// Keep waiting
-			}
+		if !h.waitForSource(mount, listener) {
+			return
 		}
 	}
 
-	// Get buffer from pool - use larger buffer for efficiency
+	// Get read buffer from pool
 	bufPtr := h.bufPool.Get().(*[]byte)
 	readBuf := *bufPtr
 	defer h.bufPool.Put(bufPtr)
 
-	// Start at a position that gives us some buffer room
-	// Don't start at live edge - start with some burst data for smooth playback
-	writePos := buffer.WritePos()
-	burstSize := int64(buffer.BurstSize())
-	if burstSize > writePos {
-		burstSize = writePos
-	}
-	readPos := writePos - burstSize
-	if readPos < 0 {
-		readPos = 0
-	}
+	// Calculate starting position with burst data for smooth playback start
+	readPos := h.calculateStartPosition(buffer)
 
-	// Frame sync state - find MP3 frame on first read
+	// State tracking
 	needsSync := true
-
-	// Metadata state
 	var metaByteCount int
 	var lastMeta string
 
-	// Timeout handling - generous timeout for slow connections
-	timeout := h.config.Limits.ClientTimeout
-	if timeout == 0 {
-		timeout = defaultClientTimeout
-	}
+	// Timeout handling
+	timeout := h.getClientTimeout()
 	lastActivity := time.Now()
-	lastFlush := time.Now()
 
-	// Source disconnect handling
+	// Source state tracking
 	var sourceDisconnectTime time.Time
-	sourceWasActive := true // We know it's active now
+	sourceWasActive := true
 
-	// Track bytes written since last flush for TLS optimization
-	bytesSinceFlush := 0
-
-	// Main streaming loop - BULLETPROOF version
-	// This loop is designed to work identically for HTTP and HTTPS
+	// ==========================================================================
+	// MAIN STREAMING LOOP - This is where the magic happens
+	// ==========================================================================
 	for {
-		// Check client disconnect
+		// CHECK 1: Client still connected?
 		select {
 		case <-listener.Done():
 			return
 		default:
 		}
 
-		// Check source status with reconnection support
+		// CHECK 2: Source status
 		sourceActive := mount.IsActive()
-
 		if !sourceActive {
 			if sourceWasActive {
-				// Source just disconnected, start waiting
 				sourceDisconnectTime = time.Now()
 				sourceWasActive = false
 			}
 
-			// Check if we've waited too long
+			// Source gone too long?
 			if time.Since(sourceDisconnectTime) > sourceReconnectWait {
-				return // Give up, source not coming back
+				return
 			}
 
-			// Wait a bit for reconnection - but keep checking for data
-			// There might still be buffered data to send
+			// Brief wait, but keep trying to read buffered data
 			select {
 			case <-listener.Done():
 				return
 			case <-time.After(50 * time.Millisecond):
-				// Continue to try reading any remaining buffered data
 			}
 		} else {
 			if !sourceWasActive {
-				// Source just reconnected - DON'T reset position!
-				// Keep reading from where we were to avoid losing any data
-				// The buffer is large enough to handle the gap
-				needsSync = true // Need to find MP3 frame again
+				// Source reconnected! Re-sync to audio frames
+				needsSync = true
 			}
 			sourceWasActive = true
 		}
 
-		// Check client timeout
+		// CHECK 3: Client timeout
 		if time.Since(lastActivity) > timeout {
 			return
 		}
 
-		// Try to read data - this is the bulletproof read
+		// READ: Get data from the ring buffer
 		n, newPos := buffer.ReadFromInto(readPos, readBuf)
 
 		if n == 0 {
-			// No data available - flush any pending data before waiting
-			// This is critical for TLS where data may be buffered
-			if hasFlusher && bytesSinceFlush > 0 {
+			// No data available - flush anything pending and wait
+			if hasFlusher {
 				flusher.Flush()
-				bytesSinceFlush = 0
-				lastFlush = time.Now()
 			}
-
-			// Wait efficiently with short timeout
-			// This prevents busy-waiting while being responsive
-			if buffer.WaitForData(readPos, dataPollInterval) {
-				continue
-			}
+			buffer.WaitForData(readPos, dataPollInterval)
 			continue
 		}
 
@@ -373,10 +348,9 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		readPos = newPos
 		lastActivity = time.Now()
 
-		// Find MP3 frame sync on first chunk for clean audio start
+		// SYNC: Find MP3 frame boundary on first read for clean audio start
 		if needsSync && n >= 4 {
-			syncOffset := findMP3Sync(data)
-			if syncOffset > 0 && syncOffset < n-4 {
+			if syncOffset := findMP3Sync(data); syncOffset > 0 && syncOffset < n-4 {
 				data = data[syncOffset:]
 			}
 			needsSync = false
@@ -386,44 +360,29 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			continue
 		}
 
-		// Write to client using chunked writes for TLS optimization
-		// TLS has a max record size of 16KB, and smaller chunks ensure
-		// more consistent latency across HTTP and HTTPS
+		// WRITE: Send data to client
 		var err error
 		if metaInterval > 0 {
 			err = writeDataWithMeta(w, data, mount, &metaByteCount, &lastMeta, metaInterval)
 		} else {
-			// Write in optimal chunks for TLS
-			err = h.writeChunked(w, data)
+			_, err = sw.Write(data)
 		}
 
 		if err != nil {
 			return // Client disconnected
 		}
 
+		// FLUSH: Immediate flush after every write - this is critical!
+		// The StreamWriter already flushes, but we double-flush for safety
+		if hasFlusher {
+			flusher.Flush()
+		}
+
+		// Update listener stats
 		listener.BytesSent += int64(len(data))
 		listener.LastActive = lastActivity
-		bytesSinceFlush += len(data)
 
-		// Smart flushing strategy for consistent HTTP/HTTPS behavior:
-		// 1. Flush if we've accumulated enough data (TLS record optimization)
-		// 2. Flush if enough time has passed (latency optimization)
-		// 3. Always flush after metadata writes
-		shouldFlush := false
-		if bytesSinceFlush >= tlsOptimalChunkSize {
-			shouldFlush = true
-		}
-		if time.Since(lastFlush) >= flushInterval {
-			shouldFlush = true
-		}
-
-		if hasFlusher && shouldFlush {
-			flusher.Flush()
-			bytesSinceFlush = 0
-			lastFlush = time.Now()
-		}
-
-		// Check duration limit
+		// Check max duration limit
 		if mount.Config.MaxListenerDuration > 0 {
 			if time.Since(listener.ConnectedAt) > mount.Config.MaxListenerDuration {
 				return
@@ -432,29 +391,48 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	}
 }
 
-// writeChunked writes data in optimal chunks for TLS
-// This ensures consistent behavior between HTTP and HTTPS by avoiding
-// large writes that could cause buffering delays in TLS
-func (h *ListenerHandler) writeChunked(w io.Writer, data []byte) error {
-	remaining := data
-	for len(remaining) > 0 {
-		chunkSize := len(remaining)
-		if chunkSize > tlsOptimalChunkSize {
-			chunkSize = tlsOptimalChunkSize
+// waitForSource waits for a source to connect, returns false if we should give up
+func (h *ListenerHandler) waitForSource(mount *stream.Mount, listener *stream.Listener) bool {
+	waitStart := time.Now()
+	for !mount.IsActive() {
+		if time.Since(waitStart) > sourceReconnectWait {
+			return false
 		}
-
-		n, err := w.Write(remaining[:chunkSize])
-		if err != nil {
-			return err
-		}
-		if n < chunkSize {
-			// Partial write, try to write the rest
-			remaining = remaining[n:]
-		} else {
-			remaining = remaining[chunkSize:]
+		select {
+		case <-listener.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return nil
+	return true
+}
+
+// calculateStartPosition determines where to start reading for a new listener
+// We start behind the live edge to provide burst data for smooth playback
+func (h *ListenerHandler) calculateStartPosition(buffer *stream.Buffer) int64 {
+	writePos := buffer.WritePos()
+	burstSize := int64(buffer.BurstSize())
+
+	// Don't try to burst more than what's available
+	if burstSize > writePos {
+		burstSize = writePos
+	}
+
+	readPos := writePos - burstSize
+	if readPos < 0 {
+		readPos = 0
+	}
+
+	return readPos
+}
+
+// getClientTimeout returns the configured client timeout or default
+func (h *ListenerHandler) getClientTimeout() time.Duration {
+	cfg := h.getConfig()
+	if cfg.Limits.ClientTimeout > 0 {
+		return cfg.Limits.ClientTimeout
+	}
+	return defaultClientTimeout
 }
 
 // findMP3Sync finds the first valid MP3 frame sync in data

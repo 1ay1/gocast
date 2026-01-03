@@ -43,10 +43,10 @@ type Buffer struct {
 func NewBuffer(size int, burstSize int) *Buffer {
 	// Default sizes optimized for 320kbps streaming - LARGE buffers to prevent any data loss
 	if size <= 0 {
-		size = 1048576 // 1MB = ~26 seconds at 320kbps - bulletproof!
+		size = 2097152 // 2MB = ~52 seconds at 320kbps - bulletproof!
 	}
 	if burstSize <= 0 {
-		burstSize = 32768 // 32KB = ~800ms at 320kbps - smooth start
+		burstSize = 65536 // 64KB = ~1.6 seconds at 320kbps - smooth start
 	}
 
 	// Round up to power of 2 for fast modulo
