@@ -249,7 +249,6 @@ func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount,
 	meta := mount.GetMetadata()
 
 	w.Header().Set("Content-Type", meta.ContentType)
-	w.Header().Set("Connection", "close")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Server", "GoCast/"+Version)
