@@ -10,6 +10,12 @@ const DashboardPage = {
     // Previous stats for change detection
     _prevStats: null,
 
+    // Bandwidth tracking for real-time calculation
+    _lastBytesTotal: 0,
+    _lastBytesTime: 0,
+    _smoothedBandwidth: 0,
+    _bandwidthSamples: [],
+
     /**
      * Render the dashboard page
      */
@@ -163,6 +169,10 @@ const DashboardPage = {
             this._interval = null;
         }
         this._prevStats = null;
+        this._lastBytesTotal = 0;
+        this._lastBytesTime = 0;
+        this._smoothedBandwidth = 0;
+        this._bandwidthSamples = [];
     },
 
     /**
@@ -208,11 +218,57 @@ const DashboardPage = {
         const peakEl = UI.$("peakListeners");
         if (peakEl) peakEl.textContent = peakListeners;
 
-        // Update bandwidth display
+        // Update bandwidth display with real-time calculation and smoothing
         const bandwidthEl = UI.$("totalBandwidth");
         if (bandwidthEl) {
-            const bytesPerSec = status.bytes_per_sec || 0;
-            bandwidthEl.textContent = this.formatBandwidth(bytesPerSec);
+            const currentBytes = status.total_bytes_sent || 0;
+            const currentTime = Date.now();
+
+            // Calculate real-time bandwidth from delta
+            let realtimeBandwidth = 0;
+            if (this._lastBytesTime > 0 && currentTime > this._lastBytesTime) {
+                const bytesDelta = currentBytes - this._lastBytesTotal;
+                const timeDelta = (currentTime - this._lastBytesTime) / 1000; // seconds
+                if (bytesDelta >= 0 && timeDelta > 0) {
+                    realtimeBandwidth = bytesDelta / timeDelta;
+                }
+            }
+
+            // Update tracking
+            this._lastBytesTotal = currentBytes;
+            this._lastBytesTime = currentTime;
+
+            // Add to samples for smoothing (keep last 5 samples)
+            if (realtimeBandwidth > 0 || this._bandwidthSamples.length > 0) {
+                this._bandwidthSamples.push(realtimeBandwidth);
+                if (this._bandwidthSamples.length > 5) {
+                    this._bandwidthSamples.shift();
+                }
+            }
+
+            // Calculate smoothed bandwidth (average of samples, excluding zeros if we have non-zero data)
+            if (this._bandwidthSamples.length > 0) {
+                const nonZeroSamples = this._bandwidthSamples.filter(
+                    (s) => s > 0,
+                );
+                if (nonZeroSamples.length > 0) {
+                    this._smoothedBandwidth =
+                        nonZeroSamples.reduce((a, b) => a + b, 0) /
+                        nonZeroSamples.length;
+                } else if (
+                    this._smoothedBandwidth > 0 &&
+                    this._bandwidthSamples.length < 3
+                ) {
+                    // Keep last known value briefly to prevent flicker
+                } else {
+                    this._smoothedBandwidth = 0;
+                }
+            }
+
+            // Display smoothed bandwidth
+            bandwidthEl.textContent = this.formatBandwidth(
+                this._smoothedBandwidth,
+            );
         }
 
         const liveCountEl = UI.$("liveCount");
