@@ -400,17 +400,19 @@ func (cm *ConfigManager) validateAndFix(cfg *Config) []string {
 		warnings = append(warnings, "Invalid max_listeners_per_mount, setting to 100")
 		cfg.Limits.MaxListenersPerMount = 100
 	}
-	if cfg.Limits.QueueSize < 1024 {
-		warnings = append(warnings, "queue_size too small, setting to 1024")
-		cfg.Limits.QueueSize = 1024
+	// Minimum queue size for smooth streaming: 2MB = ~52 seconds at 320kbps
+	if cfg.Limits.QueueSize < 2097152 {
+		warnings = append(warnings, "queue_size too small for smooth streaming, setting to 2MB")
+		cfg.Limits.QueueSize = 2097152
 	}
 	if cfg.Limits.QueueSize > 10*1024*1024 {
 		warnings = append(warnings, "queue_size too large (>10MB), capping at 10MB")
 		cfg.Limits.QueueSize = 10 * 1024 * 1024
 	}
-	if cfg.Limits.BurstSize < 0 {
-		warnings = append(warnings, "Invalid burst_size, setting to 2048")
-		cfg.Limits.BurstSize = 2048
+	// Minimum burst size for smooth streaming: 128KB = ~3.2 seconds at 320kbps
+	if cfg.Limits.BurstSize < 131072 {
+		warnings = append(warnings, "burst_size too small for smooth streaming, setting to 128KB")
+		cfg.Limits.BurstSize = 131072
 	}
 
 	// Fix invalid timeouts
@@ -532,9 +534,12 @@ func (cm *ConfigManager) validateMount(path string, mount *MountConfig) []string
 		mount.Type = "audio/mpeg"
 	}
 
-	// Fix burst size
-	if mount.BurstSize < 0 {
-		mount.BurstSize = 2048
+	// Fix burst size - minimum 128KB for smooth streaming
+	if mount.BurstSize < 131072 {
+		if mount.BurstSize > 0 {
+			warnings = append(warnings, fmt.Sprintf("Mount %s: burst_size too small for smooth streaming, setting to 128KB", path))
+		}
+		mount.BurstSize = 131072
 	}
 	if mount.BurstSize > 1024*1024 {
 		warnings = append(warnings, fmt.Sprintf("Mount %s: burst_size too large (>1MB), capping at 1MB", path))
