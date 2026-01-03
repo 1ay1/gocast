@@ -312,6 +312,18 @@ func (m *Mount) GetListeners() []*Listener {
 	return result
 }
 
+// TotalBytesSent returns the total bytes sent to all current listeners
+func (m *Mount) TotalBytesSent() int64 {
+	m.listenerMu.RLock()
+	defer m.listenerMu.RUnlock()
+
+	var total int64
+	for _, l := range m.listeners {
+		total += atomic.LoadInt64(&l.BytesSent)
+	}
+	return total
+}
+
 // UniqueListener represents a consolidated view of listeners from the same IP/UserAgent
 type UniqueListener struct {
 	IP          string
@@ -461,6 +473,7 @@ func (m *Mount) Stats() MountStats {
 		SourceIP:         m.sourceIP,
 		StartTime:        m.startTime,
 		BytesReceived:    atomic.LoadInt64(&m.bytesReceived),
+		BytesSent:        m.TotalBytesSent(),
 		Listeners:        m.UniqueListenerCount(), // Use unique count for display
 		TotalConnections: m.ListenerCount(),       // Raw connection count
 		PeakListeners:    m.PeakListeners(),
@@ -476,8 +489,9 @@ type MountStats struct {
 	SourceIP         string
 	StartTime        time.Time
 	BytesReceived    int64
-	Listeners        int // Unique listeners (by IP+UserAgent)
-	TotalConnections int // Raw TCP connection count
+	BytesSent        int64 // Total bytes sent to all listeners
+	Listeners        int   // Unique listeners (by IP+UserAgent)
+	TotalConnections int   // Raw TCP connection count
 	PeakListeners    int
 	ContentType      string
 	Metadata         *Metadata
@@ -658,6 +672,18 @@ func (mm *MountManager) TotalListeners() int {
 	total := 0
 	for _, mount := range mm.mounts {
 		total += mount.ListenerCount()
+	}
+	return total
+}
+
+// TotalBytesSent returns the total bytes sent across all mounts
+func (mm *MountManager) TotalBytesSent() int64 {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+
+	var total int64
+	for _, mount := range mm.mounts {
+		total += mount.TotalBytesSent()
 	}
 	return total
 }

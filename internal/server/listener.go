@@ -693,8 +693,15 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 		serverID = "GoCast"
 	}
 
-	sb.WriteString(fmt.Sprintf(`{"server_id":%q,"version":%q,"started":%q,"uptime":%d,"host":%q,"mounts":[`,
-		serverID, h.version, h.startTime.Format(time.RFC3339), uptime, cfg.Server.Hostname))
+	// Calculate total bytes sent and bandwidth
+	totalBytesSent := h.mountManager.TotalBytesSent()
+	var bytesPerSec int64
+	if uptime > 0 {
+		bytesPerSec = totalBytesSent / uptime
+	}
+
+	sb.WriteString(fmt.Sprintf(`{"server_id":%q,"version":%q,"started":%q,"uptime":%d,"host":%q,"total_bytes_sent":%d,"bytes_per_sec":%d,"mounts":[`,
+		serverID, h.version, h.startTime.Format(time.RFC3339), uptime, cfg.Server.Hostname, totalBytesSent, bytesPerSec))
 
 	for i, mountPath := range mounts {
 		if i > 0 {
@@ -707,9 +714,9 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 		stats := mount.Stats()
 		meta := mount.GetMetadata()
 
-		// Include metadata object with stream_title for admin panel
-		sb.WriteString(fmt.Sprintf(`{"path":%q,"active":%t,"listeners":%d,"peak":%d,"name":%q,"genre":%q,"bitrate":%d,"metadata":{"stream_title":%q,"artist":%q,"title":%q}}`,
-			mountPath, mount.IsActive(), stats.Listeners, stats.PeakListeners,
+		// Include metadata object with stream_title for admin panel, plus bytes_sent
+		sb.WriteString(fmt.Sprintf(`{"path":%q,"active":%t,"listeners":%d,"peak":%d,"bytes_sent":%d,"name":%q,"genre":%q,"bitrate":%d,"metadata":{"stream_title":%q,"artist":%q,"title":%q}}`,
+			mountPath, mount.IsActive(), stats.Listeners, stats.PeakListeners, stats.BytesSent,
 			escapeJSON(meta.Name), escapeJSON(meta.Genre), meta.Bitrate,
 			escapeJSON(meta.StreamTitle), escapeJSON(meta.Artist), escapeJSON(meta.Title)))
 	}
