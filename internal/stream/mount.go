@@ -366,7 +366,7 @@ func (m *Mount) GetUniqueListeners() []*UniqueListener {
 		if ul, exists := unique[key]; exists {
 			// Consolidate with existing
 			ul.Connections++
-			ul.BytesSent += l.BytesSent
+			ul.BytesSent += atomic.LoadInt64(&l.BytesSent)
 			ul.IDs = append(ul.IDs, l.ID)
 			if l.ConnectedAt.Before(ul.ConnectedAt) {
 				ul.ConnectedAt = l.ConnectedAt
@@ -381,7 +381,7 @@ func (m *Mount) GetUniqueListeners() []*UniqueListener {
 				UserAgent:   l.UserAgent,
 				Connections: 1,
 				ConnectedAt: l.ConnectedAt,
-				BytesSent:   l.BytesSent,
+				BytesSent:   atomic.LoadInt64(&l.BytesSent),
 				LastActive:  l.LastActive,
 				IDs:         []string{l.ID},
 				IsBot:       l.IsBot,
