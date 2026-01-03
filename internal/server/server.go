@@ -442,12 +442,18 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 	// HTTP handler that checks dynamically if HTTPS is available
 	// This allows us to start redirecting after certificate is obtained without restart
 	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow source connections (PUT/SOURCE) on HTTP - they don't follow redirects
+		if r.Method == "PUT" || r.Method == "SOURCE" {
+			s.mainHandler.ServeHTTP(w, r)
+			return
+		}
+
 		s.httpsRunningMu.RLock()
 		httpsReady := s.httpsRunning
 		s.httpsRunningMu.RUnlock()
 
-		if httpsReady {
-			// Always redirect to HTTPS when it's running
+		if httpsReady && r.Method == http.MethodGet {
+			// Only redirect GET requests (browsers) to HTTPS
 			target := fmt.Sprintf("https://%s", s.config.Server.Hostname)
 			if s.sslPort != 443 {
 				target = fmt.Sprintf("https://%s:%d", s.config.Server.Hostname, s.sslPort)
@@ -456,7 +462,7 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 			http.Redirect(w, r, target, http.StatusMovedPermanently)
 			return
 		}
-		// Serve the full app on HTTP only when HTTPS is not available
+		// Serve on HTTP for non-GET requests or when HTTPS not available
 		s.mainHandler.ServeHTTP(w, r)
 	})
 
