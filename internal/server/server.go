@@ -822,6 +822,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Accept source password (Icecast compatibility for RadioBOSS, BUTT, etc.)
+		// Check specific mount if provided
 		mountPath := r.URL.Query().Get("mount")
 		if mountPath != "" {
 			if mount := s.mountManager.GetMount(mountPath); mount != nil {
@@ -829,6 +830,18 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				if mountCfg != nil && mountCfg.Password != "" && password == mountCfg.Password {
 					s.handleAdminStats(w, r)
 					return
+				}
+			}
+		} else {
+			// No mount specified - check if password matches ANY mount password
+			// RadioBOSS calls /admin/stats without mount parameter
+			for _, mp := range s.mountManager.ListMounts() {
+				if mount := s.mountManager.GetMount(mp); mount != nil {
+					mountCfg := mount.GetConfig()
+					if mountCfg != nil && mountCfg.Password != "" && password == mountCfg.Password {
+						s.handleAdminStats(w, r)
+						return
+					}
 				}
 			}
 		}
@@ -856,6 +869,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Accept source password (Icecast compatibility)
+		// Check specific mount if provided
 		mountPath := r.URL.Query().Get("mount")
 		if mountPath != "" {
 			if mount := s.mountManager.GetMount(mountPath); mount != nil {
@@ -863,6 +877,18 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				if mountCfg != nil && mountCfg.Password != "" && password == mountCfg.Password {
 					s.handleAdminListClients(w, r)
 					return
+				}
+			}
+		} else {
+			// No mount specified - check if password matches ANY mount password
+			// RadioBOSS calls /admin/listclients without mount parameter
+			for _, mp := range s.mountManager.ListMounts() {
+				if mount := s.mountManager.GetMount(mp); mount != nil {
+					mountCfg := mount.GetConfig()
+					if mountCfg != nil && mountCfg.Password != "" && password == mountCfg.Password {
+						s.handleAdminListClients(w, r)
+						return
+					}
 				}
 			}
 		}
@@ -943,10 +969,9 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "<server_start>%s</server_start>", s.startTime.Format(time.RFC3339))
 
 	for _, stat := range s.mountManager.Stats() {
-		fmt.Fprint(w, "<source>")
-		fmt.Fprintf(w, "<mount>%s</mount>", stat.Path)
+		fmt.Fprintf(w, "<source mount=\"%s\">", stat.Path)
 		fmt.Fprintf(w, "<listeners>%d</listeners>", stat.Listeners)
-		fmt.Fprintf(w, "<peak_listeners>%d</peak_listeners>", stat.PeakListeners)
+		fmt.Fprintf(w, "<listener_peak>%d</listener_peak>", stat.PeakListeners)
 		fmt.Fprintf(w, "<genre>%s</genre>", escapeXML(stat.Metadata.Genre))
 		fmt.Fprintf(w, "<server_name>%s</server_name>", escapeXML(stat.Metadata.Name))
 		fmt.Fprintf(w, "<server_description>%s</server_description>", escapeXML(stat.Metadata.Description))
@@ -962,9 +987,26 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 // handleAdminListClients lists connected clients for a mount
 func (s *Server) handleAdminListClients(w http.ResponseWriter, r *http.Request) {
 	mountPath := r.URL.Query().Get("mount")
+	
+	// If no mount specified, try to find an active mount (Icecast compatibility for RadioBOSS)
 	if mountPath == "" {
-		http.Error(w, "Missing mount parameter", http.StatusBadRequest)
-		return
+		mounts := s.mountManager.ListMounts()
+		if len(mounts) > 0 {
+			// Use first active mount, or first mount if none active
+			for _, mp := range mounts {
+				if m := s.mountManager.GetMount(mp); m != nil && m.IsActive() {
+					mountPath = mp
+					break
+				}
+			}
+			if mountPath == "" && len(mounts) > 0 {
+				mountPath = mounts[0]
+			}
+		}
+		if mountPath == "" {
+			http.Error(w, "No mounts available", http.StatusNotFound)
+			return
+		}
 	}
 
 	mount := s.mountManager.GetMount(mountPath)
@@ -1007,9 +1049,14 @@ func (s *Server) handleAdminListClients(w http.ResponseWriter, r *http.Request) 
 	// Default to XML for Icecast compatibility
 	w.Header().Set("Content-Type", "text/xml")
 
+	stats := mount.Stats()
+
 	fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>`)
 	fmt.Fprint(w, "\n<icestats>")
 	fmt.Fprintf(w, "<source mount=\"%s\">", mountPath)
+	fmt.Fprintf(w, "<Listeners>%d</Listeners>", stats.Listeners)
+	fmt.Fprintf(w, "<listeners>%d</listeners>", stats.Listeners)
+	fmt.Fprintf(w, "<listener_peak>%d</listener_peak>", stats.PeakListeners)
 
 	for _, listener := range uniqueListeners {
 		fmt.Fprint(w, "<listener>")
