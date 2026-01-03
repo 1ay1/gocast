@@ -18,6 +18,17 @@ import (
 	"github.com/gocast/gocast/internal/stream"
 )
 
+// Source streaming constants - optimized for consistent behavior
+const (
+	// Read buffer size for source connections
+	// 8KB is a good balance for audio streaming
+	sourceReadBufferSize = 8192
+
+	// TCP buffer sizes for source connections
+	// 64KB provides smooth buffering for up to 320kbps streams
+	sourceTCPBufferSize = 65536
+)
+
 // Handler handles source client connections
 type Handler struct {
 	mountManager *stream.MountManager
@@ -121,6 +132,9 @@ func (h *Handler) HandleSource(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	// Apply TCP optimizations for source streaming
+	optimizeTCPConnection(conn)
+
 	// Send HTTP 200 OK response immediately - this is what Icecast does
 	// and what clients expect before they start streaming
 	bufrw.WriteString("HTTP/1.0 200 OK\r\n")
@@ -151,6 +165,9 @@ func (h *Handler) HandleSourceMethod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+
+	// Apply TCP optimizations for source streaming
+	optimizeTCPConnection(conn)
 
 	// Extract mount path
 	mountPath := r.URL.Path
@@ -530,6 +547,24 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 }
 
 // getClientIP extracts the client IP from the request
+// optimizeTCPConnection applies TCP optimizations for streaming connections
+// This ensures consistent behavior for both HTTP and HTTPS source connections
+func optimizeTCPConnection(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		// Disable Nagle's algorithm for low latency
+		// This is critical for real-time audio streaming
+		tcpConn.SetNoDelay(true)
+
+		// Enable TCP keep-alive to detect dead connections
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+
+		// Set buffer sizes for smooth streaming
+		tcpConn.SetReadBuffer(sourceTCPBufferSize)
+		tcpConn.SetWriteBuffer(sourceTCPBufferSize)
+	}
+}
+
 func getClientIP(r *http.Request) string {
 	// Check X-Forwarded-For header
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {

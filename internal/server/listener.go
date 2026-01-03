@@ -20,10 +20,18 @@ import (
 var Version = "dev"
 
 // Streaming constants - OPTIMIZED FOR BULLETPROOF STREAMING
+// These values are carefully chosen to work identically for HTTP and HTTPS
 const (
 	// Read chunk size - larger chunks = more efficient, less syscalls
 	// 16KB = ~400ms at 320kbps, efficient while still responsive
+	// This size is also optimal for TLS record size (max 16KB)
 	streamChunkSize = 16384
+
+	// Write chunk size for TLS optimization
+	// TLS has a max record size of 16KB, so we align to that
+	// Smaller chunks = more responsive, larger = more efficient
+	// 4KB is a good balance for low latency streaming
+	tlsOptimalChunkSize = 4096
 
 	// Poll interval when waiting for data - fast polling for low latency
 	dataPollInterval = 2 * time.Millisecond
@@ -37,6 +45,10 @@ const (
 
 	// Client timeout for inactive connections - generous for slow networks
 	defaultClientTimeout = 120 * time.Second
+
+	// Flush interval - how often to force flush even mid-chunk
+	// This ensures data gets to clients promptly over TLS
+	flushInterval = 50 * time.Millisecond
 )
 
 // ListenerHandler handles listener HTTP requests
@@ -280,12 +292,17 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		timeout = defaultClientTimeout
 	}
 	lastActivity := time.Now()
+	lastFlush := time.Now()
 
 	// Source disconnect handling
 	var sourceDisconnectTime time.Time
 	sourceWasActive := true // We know it's active now
 
+	// Track bytes written since last flush for TLS optimization
+	bytesSinceFlush := 0
+
 	// Main streaming loop - BULLETPROOF version
+	// This loop is designed to work identically for HTTP and HTTPS
 	for {
 		// Check client disconnect
 		select {
@@ -336,7 +353,15 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		n, newPos := buffer.ReadFromInto(readPos, readBuf)
 
 		if n == 0 {
-			// No data available, wait efficiently with short timeout
+			// No data available - flush any pending data before waiting
+			// This is critical for TLS where data may be buffered
+			if hasFlusher && bytesSinceFlush > 0 {
+				flusher.Flush()
+				bytesSinceFlush = 0
+				lastFlush = time.Now()
+			}
+
+			// Wait efficiently with short timeout
 			// This prevents busy-waiting while being responsive
 			if buffer.WaitForData(readPos, dataPollInterval) {
 				continue
@@ -361,12 +386,15 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			continue
 		}
 
-		// Write to client - handle partial writes
+		// Write to client using chunked writes for TLS optimization
+		// TLS has a max record size of 16KB, and smaller chunks ensure
+		// more consistent latency across HTTP and HTTPS
 		var err error
 		if metaInterval > 0 {
 			err = writeDataWithMeta(w, data, mount, &metaByteCount, &lastMeta, metaInterval)
 		} else {
-			_, err = w.Write(data)
+			// Write in optimal chunks for TLS
+			err = h.writeChunked(w, data)
 		}
 
 		if err != nil {
@@ -375,10 +403,24 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 
 		listener.BytesSent += int64(len(data))
 		listener.LastActive = lastActivity
+		bytesSinceFlush += len(data)
 
-		// Flush for low latency - do this after every write for smooth streaming
-		if hasFlusher {
+		// Smart flushing strategy for consistent HTTP/HTTPS behavior:
+		// 1. Flush if we've accumulated enough data (TLS record optimization)
+		// 2. Flush if enough time has passed (latency optimization)
+		// 3. Always flush after metadata writes
+		shouldFlush := false
+		if bytesSinceFlush >= tlsOptimalChunkSize {
+			shouldFlush = true
+		}
+		if time.Since(lastFlush) >= flushInterval {
+			shouldFlush = true
+		}
+
+		if hasFlusher && shouldFlush {
 			flusher.Flush()
+			bytesSinceFlush = 0
+			lastFlush = time.Now()
 		}
 
 		// Check duration limit
@@ -388,6 +430,31 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			}
 		}
 	}
+}
+
+// writeChunked writes data in optimal chunks for TLS
+// This ensures consistent behavior between HTTP and HTTPS by avoiding
+// large writes that could cause buffering delays in TLS
+func (h *ListenerHandler) writeChunked(w io.Writer, data []byte) error {
+	remaining := data
+	for len(remaining) > 0 {
+		chunkSize := len(remaining)
+		if chunkSize > tlsOptimalChunkSize {
+			chunkSize = tlsOptimalChunkSize
+		}
+
+		n, err := w.Write(remaining[:chunkSize])
+		if err != nil {
+			return err
+		}
+		if n < chunkSize {
+			// Partial write, try to write the rest
+			remaining = remaining[n:]
+		} else {
+			remaining = remaining[chunkSize:]
+		}
+	}
+	return nil
 }
 
 // findMP3Sync finds the first valid MP3 frame sync in data

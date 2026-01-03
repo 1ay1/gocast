@@ -167,12 +167,16 @@ func NewAutoSSLManager(cfg AutoSSLConfig, logger *log.Logger) (*AutoSSLManager, 
 }
 
 // TLSConfig returns a TLS configuration that uses the managed certificate
+// This returns a basic config - use OptimizedTLSConfigWithGetCert for streaming
 func (a *AutoSSLManager) TLSConfig() *tls.Config {
-	return &tls.Config{
-		GetCertificate: a.GetCertificate,
-		MinVersion:     tls.VersionTLS12,
-		NextProtos:     []string{"h2", "http/1.1"},
-	}
+	// Use the optimized streaming TLS config with our dynamic certificate getter
+	cfg := OptimizedTLSConfig()
+	cfg.GetCertificate = a.GetCertificate
+	// IMPORTANT: Only HTTP/1.1 - HTTP/2 flow control causes audio streaming issues
+	// HTTP/2's multiplexing and flow control mechanisms buffer data in ways that
+	// cause skipping and lag in continuous audio streams
+	cfg.NextProtos = []string{"http/1.1"}
+	return cfg
 }
 
 // GetCertificate returns the current certificate for TLS connections

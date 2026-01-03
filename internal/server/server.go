@@ -274,29 +274,25 @@ func (s *Server) Start() error {
 	// Create main router
 	mux := s.createRouter()
 
+	// Wrap with streaming optimizations for consistent behavior
+	wrappedHandler := WrapHandler(mux)
+
 	// Store main handler for potential dynamic use
-	s.mainHandler = mux
+	s.mainHandler = wrappedHandler
 
 	// Check if AutoSSL is enabled
 	if s.config.SSL.AutoSSL {
-		return s.startWithAutoSSL(mux)
+		return s.startWithAutoSSL(wrappedHandler)
 	}
 
 	// Check if manual SSL is enabled
 	if s.config.SSL.Enabled {
-		return s.startWithManualSSL(mux)
+		return s.startWithManualSSL(wrappedHandler)
 	}
 
-	// No SSL - just start HTTP server
+	// No SSL - just start HTTP server using unified streaming config
 	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.Server.Port)
-	s.httpServer = &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
-		IdleTimeout:       s.config.Limits.ClientTimeout,
-		MaxHeaderBytes:    1 << 20, // 1MB
-		ConnState:         s.connStateHandler,
-	}
+	s.httpServer = StreamingHTTPServer(addr, wrappedHandler, s.config, s.connStateHandler)
 
 	// Start HTTP server
 	go func() {
@@ -323,8 +319,11 @@ func (s *Server) startWithManualSSL(handler http.Handler) error {
 		return fmt.Errorf("failed to load SSL certificates: %w", err)
 	}
 
+	// Create optimized TLS config with the certificate
+	tlsConfig := OptimizedTLSConfigWithCert(cert)
+
 	// Create HTTPS handler with HSTS
-	httpsHandler := s.wrapWithHSTS(handler)
+	httpsHandler := HSTSHandler(handler)
 
 	// Create redirect handler for HTTP -> HTTPS
 	redirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -336,15 +335,9 @@ func (s *Server) startWithManualSSL(handler http.Handler) error {
 		http.Redirect(w, r, target, http.StatusMovedPermanently)
 	})
 
-	// Start HTTP server (redirects to HTTPS)
+	// Start HTTP server (redirects to HTTPS) using unified streaming config
 	httpAddr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.Server.Port)
-	s.httpServer = &http.Server{
-		Addr:              httpAddr,
-		Handler:           redirectHandler,
-		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
-		IdleTimeout:       s.config.Limits.ClientTimeout,
-		MaxHeaderBytes:    1 << 20,
-	}
+	s.httpServer = StreamingHTTPServer(httpAddr, redirectHandler, s.config, nil)
 
 	go func() {
 		s.logger.Printf("[GoCast] HTTP server listening on %s (redirects to HTTPS)", httpAddr)
@@ -353,19 +346,9 @@ func (s *Server) startWithManualSSL(handler http.Handler) error {
 		}
 	}()
 
-	// Start HTTPS server
+	// Start HTTPS server using unified streaming config with optimized TLS
 	httpsAddr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, sslPort)
-	s.httpsServer = &http.Server{
-		Addr:    httpsAddr,
-		Handler: httpsHandler,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		},
-		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
-		IdleTimeout:       s.config.Limits.ClientTimeout,
-		MaxHeaderBytes:    1 << 20,
-	}
+	s.httpsServer = StreamingHTTPSServer(httpsAddr, httpsHandler, s.config, tlsConfig, s.connStateHandler)
 
 	go func() {
 		s.logger.Printf("[GoCast] HTTPS server listening on %s", httpsAddr)
@@ -384,12 +367,9 @@ func (s *Server) startWithManualSSL(handler http.Handler) error {
 }
 
 // wrapWithHSTS wraps a handler to add HSTS header for HTTPS connections
+// Deprecated: Use HSTSHandler from streaming.go instead for consistency
 func (s *Server) wrapWithHSTS(handler http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Add HSTS header (1 year)
-		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-		handler.ServeHTTP(w, r)
-	})
+	return HSTSHandler(handler)
 }
 
 // startWithAutoSSL starts the server with automatic Let's Encrypt SSL using DNS-01 challenge
@@ -455,7 +435,7 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 		// - Only redirect /admin and /admin/ (the admin panel web UI) to HTTPS for security
 		// - Everything else stays on HTTP - streams, API endpoints, metadata, stats, etc.
 		// - This is the cleanest approach for Icecast compatibility
-		
+
 		s.httpsRunningMu.RLock()
 		httpsReady := s.httpsRunning
 		s.httpsRunningMu.RUnlock()
@@ -475,13 +455,8 @@ func (s *Server) startWithAutoSSL(handler http.Handler) error {
 		s.mainHandler.ServeHTTP(w, r)
 	})
 
-	s.httpServer = &http.Server{
-		Addr:              httpAddr,
-		Handler:           httpHandler,
-		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
-		IdleTimeout:       s.config.Limits.ClientTimeout,
-		MaxHeaderBytes:    1 << 20,
-	}
+	// Use unified streaming server config for HTTP
+	s.httpServer = StreamingHTTPServer(httpAddr, httpHandler, s.config, s.connStateHandler)
 
 	go func() {
 		s.logger.Printf("[GoCast] HTTP server listening on %s", httpAddr)
@@ -526,16 +501,15 @@ func (s *Server) startHTTPSDynamic() error {
 
 	httpsAddr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.sslPort)
 	// Wrap handler with HSTS for HTTPS
-	httpsHandler := s.wrapWithHSTS(s.mainHandler)
+	httpsHandler := HSTSHandler(s.mainHandler)
 
-	s.httpsServer = &http.Server{
-		Addr:              httpsAddr,
-		Handler:           httpsHandler,
-		TLSConfig:         s.autoSSL.TLSConfig(),
-		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
-		IdleTimeout:       s.config.Limits.ClientTimeout,
-		MaxHeaderBytes:    1 << 20,
-	}
+	// Create optimized TLS config with dynamic certificate getter from AutoSSL
+	// This merges the AutoSSL TLS config with our streaming optimizations
+	baseTLSConfig := s.autoSSL.TLSConfig()
+	tlsConfig := OptimizedTLSConfigWithGetCert(baseTLSConfig.GetCertificate)
+
+	// Use unified streaming server config for HTTPS
+	s.httpsServer = StreamingHTTPSServer(httpsAddr, httpsHandler, s.config, tlsConfig, s.connStateHandler)
 
 	go func() {
 		s.logger.Printf("[GoCast] HTTPS server listening on %s", httpsAddr)
@@ -561,26 +535,20 @@ func (s *Server) IsHTTPSRunning() bool {
 }
 
 // startHTTPS starts the HTTPS server (legacy - now handled by startWithManualSSL)
+// Deprecated: Use startWithManualSSL instead for unified configuration
 func (s *Server) startHTTPS(handler http.Handler) error {
 	cert, err := tls.LoadX509KeyPair(s.config.SSL.CertPath, s.config.SSL.KeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to load SSL certificates: %w", err)
 	}
 
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}
+	// Use optimized TLS config
+	tlsConfig := OptimizedTLSConfigWithCert(cert)
 
 	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddress, s.config.SSL.Port)
-	s.httpsServer = &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		TLSConfig:         tlsConfig,
-		ReadHeaderTimeout: s.config.Limits.HeaderTimeout,
-		IdleTimeout:       s.config.Limits.ClientTimeout,
-		MaxHeaderBytes:    1 << 20,
-	}
+
+	// Use unified streaming server config
+	s.httpsServer = StreamingHTTPSServer(addr, handler, s.config, tlsConfig, s.connStateHandler)
 
 	go func() {
 		s.logger.Printf("Starting GoCast HTTPS server on %s", addr)
@@ -958,7 +926,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 // handleAdminListClients lists connected clients for a mount
 func (s *Server) handleAdminListClients(w http.ResponseWriter, r *http.Request) {
 	mountPath := r.URL.Query().Get("mount")
-	
+
 	// If no mount specified, try to find an active mount (Icecast compatibility for RadioBOSS)
 	if mountPath == "" {
 		mounts := s.mountManager.ListMounts()
