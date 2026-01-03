@@ -10,11 +10,9 @@ const DashboardPage = {
     // Previous stats for change detection
     _prevStats: null,
 
-    // Bandwidth tracking for real-time calculation
-    _lastBytesTotal: 0,
-    _lastBytesTime: 0,
-    _smoothedBandwidth: 0,
-    _bandwidthSamples: [],
+    // Bandwidth tracking - use 10-second moving average to smooth bursty data
+    _bandwidthHistory: [], // [{bytes, time}, ...]
+    _lastDisplayedBandwidth: 0,
 
     /**
      * Render the dashboard page
@@ -169,10 +167,8 @@ const DashboardPage = {
             this._interval = null;
         }
         this._prevStats = null;
-        this._lastBytesTotal = 0;
-        this._lastBytesTime = 0;
-        this._smoothedBandwidth = 0;
-        this._bandwidthSamples = [];
+        this._bandwidthHistory = [];
+        this._lastDisplayedBandwidth = 0;
     },
 
     /**
@@ -218,57 +214,50 @@ const DashboardPage = {
         const peakEl = UI.$("peakListeners");
         if (peakEl) peakEl.textContent = peakListeners;
 
-        // Update bandwidth display with real-time calculation and smoothing
+        // Update bandwidth display - use 10-second moving average to smooth bursty data
         const bandwidthEl = UI.$("totalBandwidth");
         if (bandwidthEl) {
             const currentBytes = status.total_bytes_sent || 0;
             const currentTime = Date.now();
 
-            // Calculate real-time bandwidth from delta
-            let realtimeBandwidth = 0;
-            if (this._lastBytesTime > 0 && currentTime > this._lastBytesTime) {
-                const bytesDelta = currentBytes - this._lastBytesTotal;
-                const timeDelta = (currentTime - this._lastBytesTime) / 1000; // seconds
-                if (bytesDelta >= 0 && timeDelta > 0) {
-                    realtimeBandwidth = bytesDelta / timeDelta;
-                }
-            }
+            // Add current sample to history
+            this._bandwidthHistory.push({
+                bytes: currentBytes,
+                time: currentTime,
+            });
 
-            // Update tracking
-            this._lastBytesTotal = currentBytes;
-            this._lastBytesTime = currentTime;
-
-            // Add to samples for smoothing (keep last 5 samples)
-            if (realtimeBandwidth > 0 || this._bandwidthSamples.length > 0) {
-                this._bandwidthSamples.push(realtimeBandwidth);
-                if (this._bandwidthSamples.length > 5) {
-                    this._bandwidthSamples.shift();
-                }
-            }
-
-            // Calculate smoothed bandwidth (average of samples, excluding zeros if we have non-zero data)
-            if (this._bandwidthSamples.length > 0) {
-                const nonZeroSamples = this._bandwidthSamples.filter(
-                    (s) => s > 0,
-                );
-                if (nonZeroSamples.length > 0) {
-                    this._smoothedBandwidth =
-                        nonZeroSamples.reduce((a, b) => a + b, 0) /
-                        nonZeroSamples.length;
-                } else if (
-                    this._smoothedBandwidth > 0 &&
-                    this._bandwidthSamples.length < 3
-                ) {
-                    // Keep last known value briefly to prevent flicker
-                } else {
-                    this._smoothedBandwidth = 0;
-                }
-            }
-
-            // Display smoothed bandwidth
-            bandwidthEl.textContent = this.formatBandwidth(
-                this._smoothedBandwidth,
+            // Keep only last 10 seconds of samples
+            const cutoffTime = currentTime - 10000;
+            this._bandwidthHistory = this._bandwidthHistory.filter(
+                (s) => s.time > cutoffTime,
             );
+
+            // Calculate bandwidth from oldest to newest sample in window
+            let bandwidth = 0;
+            if (this._bandwidthHistory.length >= 2) {
+                const oldest = this._bandwidthHistory[0];
+                const newest =
+                    this._bandwidthHistory[this._bandwidthHistory.length - 1];
+                const bytesDelta = newest.bytes - oldest.bytes;
+                const timeDelta = (newest.time - oldest.time) / 1000;
+                if (bytesDelta > 0 && timeDelta > 0.5) {
+                    bandwidth = bytesDelta / timeDelta;
+                }
+            }
+
+            // Update display - use last known value if current is 0 but we have listeners
+            if (bandwidth > 0) {
+                this._lastDisplayedBandwidth = bandwidth;
+                bandwidthEl.textContent = this.formatBandwidth(bandwidth);
+            } else if (totalListeners === 0) {
+                this._lastDisplayedBandwidth = 0;
+                bandwidthEl.textContent = this.formatBandwidth(0);
+            } else if (this._lastDisplayedBandwidth > 0) {
+                // Keep showing last value briefly while data is bursty
+                bandwidthEl.textContent = this.formatBandwidth(
+                    this._lastDisplayedBandwidth,
+                );
+            }
         }
 
         const liveCountEl = UI.$("liveCount");

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gocast/gocast/internal/config"
@@ -393,7 +394,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		}
 
 		burstSent += int64(len(data))
-		listener.BytesSent += int64(len(data))
+		atomic.AddInt64(&listener.BytesSent, int64(len(data)))
 	}
 
 	// Flush the burst
@@ -461,7 +462,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			return
 		}
 
-		listener.BytesSent += int64(len(data))
+		atomic.AddInt64(&listener.BytesSent, int64(len(data)))
 
 		// Flush immediately after every write
 		if hasFlusher {
