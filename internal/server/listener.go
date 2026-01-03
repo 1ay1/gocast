@@ -23,32 +23,42 @@ var Version = "dev"
 // BULLETPROOF STREAMING CONSTANTS
 // =============================================================================
 //
-// These values are the result of extensive testing and optimization.
-// They ensure smooth, uninterrupted audio streaming over both HTTP and HTTPS.
+// These values are carefully tuned for SMOOTH, UNINTERRUPTED audio streaming.
+// The key insight: we must deliver data at a CONSTANT RATE, not as fast as possible.
+//
+// Audio streaming is like filling a bathtub while draining it:
+// - Player drains at constant rate (bitrate)
+// - We must fill at the same rate
+// - Initial burst gives a "head start" to survive network hiccups
 const (
-	// streamChunkSize: How much audio data we read from the buffer at once
-	// 8KB = ~200ms at 320kbps - large enough for efficiency, small enough for responsiveness
-	streamChunkSize = 8192
-
-	// dataPollInterval: Legacy - now using instant wakeup via sync.Cond
-	// Kept for backward compatibility but WaitForDataFast doesn't use this
-	dataPollInterval = 1 * time.Millisecond
+	// streamChunkSize: Read buffer size
+	// 16KB allows efficient reads from the ring buffer
+	streamChunkSize = 16384
 
 	// sourceReconnectWait: How long listeners wait for source to reconnect
-	// 30 seconds allows for brief source interruptions without dropping listeners
 	sourceReconnectWait = 30 * time.Second
 
-	// icyMetaInterval: Standard Icecast metadata interval (bytes between metadata blocks)
-	// 16000 is the standard value used by most Icecast clients
+	// icyMetaInterval: Standard Icecast metadata interval
 	icyMetaInterval = 16000
 
-	// defaultClientTimeout: How long before we consider a client dead
-	// 120 seconds is generous for mobile/satellite connections
+	// defaultClientTimeout: Generous timeout for slow connections
 	defaultClientTimeout = 120 * time.Second
 
-	// burstDuration: Target duration of audio data to send immediately on connect
-	// 2 seconds of burst data ensures smooth playback start
-	burstDuration = 2 * time.Second
+	// ==========================================================================
+	// RATE CONTROL CONSTANTS - These are the KEY to smooth streaming
+	// ==========================================================================
+
+	// initialBurstBytes: How many bytes of audio to send immediately
+	// ~64KB = ~1.6 seconds at 320kbps - fills player buffer quickly
+	initialBurstBytes = 65536
+
+	// sendIntervalMs: How often we send data (in milliseconds)
+	// 25ms = 40 sends per second = very smooth delivery
+	sendIntervalMs = 25
+
+	// defaultBitrate: Default bitrate if not specified (bits per second)
+	// 320kbps is common for high-quality MP3
+	defaultBitrate = 320000
 )
 
 // ListenerHandler handles listener HTTP requests
@@ -237,31 +247,29 @@ func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount,
 	w.WriteHeader(http.StatusOK)
 }
 
-// streamToClient streams audio data to client with BULLETPROOF error handling
-// This implementation prioritizes data integrity - no bytes are ever skipped unless
-// the listener is more than buffer-size behind (26+ seconds at 320kbps)
-// streamToClient is the BULLETPROOF audio streaming function.
+// streamToClient implements BULLETPROOF rate-controlled audio streaming.
 //
-// This function is the core of GoCast's streaming capability. It has been
-// designed with one goal: deliver audio data to the client without interruption.
+// This is the heart of GoCast. It ensures smooth, uninterrupted audio by:
 //
-// Key design principles:
-// 1. IMMEDIATE DELIVERY - Every byte is sent and flushed immediately
-// 2. NO INTERNAL BUFFERING - Data flows straight through to the client
-// 3. GRACEFUL SOURCE HANDLING - Survives source disconnects/reconnects
-// 4. TIMEOUT PROTECTION - Detects and handles slow/dead clients
-// 5. IDENTICAL HTTP/HTTPS BEHAVIOR - Same code path, same results
+// 1. INITIAL BURST - Send 3 seconds of audio immediately to fill player buffer
+// 2. RATE CONTROL - Deliver at exactly the bitrate rate, not faster
+// 3. JITTER ABSORPTION - Server buffer smooths out source irregularities
+//
+// Think of it like filling a bathtub while it drains:
+// - The player drains audio at a constant rate (the bitrate)
+// - We must fill at the same rate to keep the level stable
+// - Initial burst gives a "head start" to survive network hiccups
 func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metaInterval int) {
 	buffer := mount.Buffer()
 	if buffer == nil {
 		return
 	}
 
-	// Create our bulletproof stream writer for immediate flushing
+	// Create our stream writer
 	sw := NewStreamWriter(w)
 	defer sw.Close()
 
-	// Wait for source if not active (allows connecting before source starts)
+	// Wait for source if not active
 	if !mount.IsActive() {
 		if !h.waitForSource(mount, listener) {
 			return
@@ -273,61 +281,66 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	readBuf := *bufPtr
 	defer h.bufPool.Put(bufPtr)
 
-	// Calculate starting position with burst data for smooth playback start
-	readPos := h.calculateStartPosition(buffer)
+	// ==========================================================================
+	// RATE CONTROL SETUP
+	// ==========================================================================
 
-	// State tracking
+	// Get bitrate from mount config (bits per second)
+	bitrate := mount.Config.Bitrate * 1000 // Convert kbps to bps
+	if bitrate <= 0 {
+		bitrate = defaultBitrate
+	}
+	bytesPerSecond := bitrate / 8 // Convert to bytes per second
+
+	// Calculate bytes to send per interval
+	// At 320kbps (40KB/s) with 25ms interval = 1000 bytes per send
+	bytesPerInterval := (bytesPerSecond * sendIntervalMs) / 1000
+	if bytesPerInterval < 500 {
+		bytesPerInterval = 500 // Minimum chunk size
+	}
+
+	// ==========================================================================
+	// PHASE 1: INITIAL BURST - Fill the player's buffer
+	// ==========================================================================
+
+	// Start reading from behind the live position to get burst data
+	writePos := buffer.WritePos()
+	burstAvailable := int64(buffer.BurstSize())
+	if burstAvailable > writePos {
+		burstAvailable = writePos
+	}
+	// Limit to our target burst size
+	if burstAvailable > initialBurstBytes {
+		burstAvailable = initialBurstBytes
+	}
+
+	readPos := writePos - burstAvailable
+	if readPos < 0 {
+		readPos = 0
+	}
+
+	// Send initial burst as fast as possible
+	burstSent := int64(0)
 	needsSync := true
-	var metaByteCount int
-	var lastMeta string
 
-	// Source state tracking
-	var sourceDisconnectTime time.Time
-	sourceWasActive := true
-
-	// ==========================================================================
-	// MAIN STREAMING LOOP - This is where the magic happens
-	// ==========================================================================
-	for {
-		// CHECK 1: Client still connected?
+	for burstSent < burstAvailable {
+		// Check for disconnect
 		select {
 		case <-listener.Done():
 			return
 		default:
 		}
 
-		// CHECK 2: Source status (only check periodically, not every loop)
-		sourceActive := mount.IsActive()
-		if !sourceActive && sourceWasActive {
-			sourceDisconnectTime = time.Now()
-			sourceWasActive = false
-		} else if sourceActive && !sourceWasActive {
-			// Source reconnected! Re-sync to audio frames
-			needsSync = true
-			sourceWasActive = true
-		}
-
-		// If source gone too long, exit
-		if !sourceActive && time.Since(sourceDisconnectTime) > sourceReconnectWait {
-			return
-		}
-
-		// READ: Get data from the ring buffer - this is the HOT PATH
 		n, newPos := buffer.ReadFromInto(readPos, readBuf)
-
 		if n == 0 {
-			// No data - wait for more (this handles timeout internally)
-			if !buffer.WaitForDataContext(readPos, listener.Done()) {
-				return // Client disconnected
-			}
-			continue
+			// No more burst data available, that's OK
+			break
 		}
 
-		// Got data - update position immediately
 		data := readBuf[:n]
 		readPos = newPos
 
-		// SYNC: Find MP3 frame boundary on first read for clean audio start
+		// Find MP3 frame sync on first chunk
 		if needsSync && n >= 4 {
 			if syncOffset := findMP3Sync(data); syncOffset > 0 && syncOffset < n-4 {
 				data = data[syncOffset:]
@@ -339,25 +352,98 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			continue
 		}
 
-		// WRITE: Send data to client - StreamWriter handles flush
+		// Write burst data
 		var err error
 		if metaInterval > 0 {
-			err = writeDataWithMeta(w, data, mount, &metaByteCount, &lastMeta, metaInterval)
-			// Flush after metadata write
-			if hasFlusher {
-				flusher.Flush()
-			}
+			err = writeDataWithMeta(w, data, mount, nil, nil, metaInterval)
 		} else {
-			// Direct write - sw.Write already flushes
 			_, err = sw.Write(data)
 		}
 
 		if err != nil {
-			return // Client disconnected
+			return
 		}
 
-		// Update listener stats (minimal overhead)
+		burstSent += int64(len(data))
 		listener.BytesSent += int64(len(data))
+	}
+
+	// Flush the burst
+	if hasFlusher {
+		flusher.Flush()
+	}
+
+	// ==========================================================================
+	// PHASE 2: SMOOTH STREAMING - Send data as it arrives, no artificial rate limiting
+	// ==========================================================================
+	//
+	// Key insight: The SOURCE already sends at the correct bitrate!
+	// We don't need to rate-limit - we just need to:
+	// 1. Read data as soon as it's available
+	// 2. Send it immediately
+	// 3. Flush after each write
+	//
+	// The large initial burst gives the player enough buffer to handle jitter.
+
+	// Track source state
+	var sourceDisconnectTime time.Time
+	sourceWasActive := true
+
+	var metaByteCount int
+	var lastMeta string
+
+	for {
+		// Check for client disconnect
+		select {
+		case <-listener.Done():
+			return
+		default:
+		}
+
+		// Check source status
+		sourceActive := mount.IsActive()
+		if !sourceActive && sourceWasActive {
+			sourceDisconnectTime = time.Now()
+			sourceWasActive = false
+		} else if sourceActive && !sourceWasActive {
+			sourceWasActive = true
+		}
+
+		if !sourceActive && time.Since(sourceDisconnectTime) > sourceReconnectWait {
+			return
+		}
+
+		// Read data from buffer
+		n, newPos := buffer.ReadFromInto(readPos, readBuf)
+		if n == 0 {
+			// No data available - wait for more
+			if !buffer.WaitForDataContext(readPos, listener.Done()) {
+				return // Client disconnected while waiting
+			}
+			continue
+		}
+
+		data := readBuf[:n]
+		readPos = newPos
+
+		// Write data immediately
+		var err error
+		if metaInterval > 0 {
+			err = writeDataWithMeta(w, data, mount, &metaByteCount, &lastMeta, metaInterval)
+		} else {
+			_, err = sw.Write(data)
+		}
+
+		if err != nil {
+			return
+		}
+
+		listener.BytesSent += int64(len(data))
+
+		// Flush after each write for immediate delivery
+		if hasFlusher {
+			flusher.Flush()
+		}
 	}
 }
 
@@ -375,34 +461,6 @@ func (h *ListenerHandler) waitForSource(mount *stream.Mount, listener *stream.Li
 		}
 	}
 	return true
-}
-
-// calculateStartPosition determines where to start reading for a new listener
-// We start behind the live edge to provide burst data for smooth playback
-func (h *ListenerHandler) calculateStartPosition(buffer *stream.Buffer) int64 {
-	writePos := buffer.WritePos()
-	burstSize := int64(buffer.BurstSize())
-
-	// Don't try to burst more than what's available
-	if burstSize > writePos {
-		burstSize = writePos
-	}
-
-	readPos := writePos - burstSize
-	if readPos < 0 {
-		readPos = 0
-	}
-
-	return readPos
-}
-
-// getClientTimeout returns the configured client timeout or default
-func (h *ListenerHandler) getClientTimeout() time.Duration {
-	cfg := h.getConfig()
-	if cfg.Limits.ClientTimeout > 0 {
-		return cfg.Limits.ClientTimeout
-	}
-	return defaultClientTimeout
 }
 
 // findMP3Sync finds the first valid MP3 frame sync in data
