@@ -381,13 +381,9 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			continue
 		}
 
-		// Write burst data
+		// Write burst data (no metadata during burst - just raw audio)
 		var err error
-		if metaInterval > 0 {
-			err = writeDataWithMeta(w, data, mount, nil, nil, metaInterval)
-		} else {
-			_, err = sw.Write(data)
-		}
+		_, err = sw.Write(data)
 
 		if err != nil {
 			return
