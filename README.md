@@ -85,9 +85,9 @@ git clone https://github.com/1ay1/gocast.git && cd gocast && go build -o gocast 
 ║              GOCAST FIRST-RUN SETUP                        ║
 ╠════════════════════════════════════════════════════════════╣
 ║  Admin Username: admin                                     ║
-║  Admin Password: xK9mP2vL8nQ4wR6j                         ║
+║  Admin Password: xK9mP2vL8nQ4wR6j                          ║
 ║                                                            ║
-║  ⚠️  SAVE THIS PASSWORD - IT WON'T BE SHOWN AGAIN!         ║
+║  SAVE THIS PASSWORD - IT WON'T BE SHOWN AGAIN!             ║
 ║                                                            ║
 ║  Open admin panel to complete setup and configure SSL      ║
 ╚════════════════════════════════════════════════════════════╝
