@@ -823,11 +823,32 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 		}
 		sb.WriteString(`,"listeners":`)
 		sb.WriteString(strconv.Itoa(stats.Listeners))
+		sb.WriteString(`,"peak":`)
+		sb.WriteString(strconv.Itoa(stats.PeakListeners))
 		sb.WriteString(`,"bytes_sent":`)
 		sb.WriteString(strconv.FormatInt(stats.BytesSent, 10))
 		sb.WriteString(`,"content_type":"`)
 		sb.WriteString(escapeJSON(stats.ContentType))
-		sb.WriteString(`"}`)
+		sb.WriteString(`"`)
+
+		// Add name and bitrate from metadata
+		if stats.Metadata != nil {
+			sb.WriteString(`,"name":"`)
+			if stats.Metadata.Name != "" {
+				sb.WriteString(escapeJSON(stats.Metadata.Name))
+			} else {
+				sb.WriteString(escapeJSON(stats.Path))
+			}
+			sb.WriteString(`","bitrate":`)
+			sb.WriteString(strconv.Itoa(stats.Metadata.Bitrate))
+
+			// Add metadata object with stream_title
+			sb.WriteString(`,"metadata":{"stream_title":"`)
+			sb.WriteString(escapeJSON(stats.Metadata.GetStreamTitle()))
+			sb.WriteString(`"}`)
+		}
+
+		sb.WriteString(`}`)
 	}
 
 	sb.WriteString(`]}`)
