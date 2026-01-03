@@ -408,7 +408,7 @@ func (b *Buffer) WaitForDataFast(pos int64) bool {
 }
 
 // WaitForDataContext waits for new data, respecting cancellation
-// BULLETPROOF: Zero allocations in the hot path
+// BULLETPROOF: Uses sync.Cond for INSTANT wakeup when data arrives
 // Returns true if data available, false if cancelled
 func (b *Buffer) WaitForDataContext(pos int64, done <-chan struct{}) bool {
 	// Fast path: data already available (most common case)
@@ -416,26 +416,53 @@ func (b *Buffer) WaitForDataContext(pos int64, done <-chan struct{}) bool {
 		return true
 	}
 
-	// Ultra-simple spin-wait: check data, check cancel, sleep tiny bit
-	// NO tickers, NO allocations - just raw polling
-	// This is the fastest possible approach for real-time streaming
-	for {
-		// Check for cancellation (non-blocking)
+	// Check if already cancelled
+	select {
+	case <-done:
+		return false
+	default:
+	}
+
+	// Use sync.Cond for instant wakeup when data arrives
+	// This is MUCH better than polling - zero latency on data arrival
+	b.condMu.Lock()
+
+	// Double-check with lock held
+	if b.writePos.Load() > pos {
+		b.condMu.Unlock()
+		return true
+	}
+
+	// Start a goroutine to signal cancellation
+	// This wakes us up if the client disconnects
+	cancelCh := make(chan struct{})
+	go func() {
 		select {
 		case <-done:
+			b.cond.Broadcast() // Wake up to check cancellation
+		case <-cancelCh:
+			// Normal exit, stop watching
+		}
+	}()
+
+	// Wait for data or cancellation
+	for b.writePos.Load() <= pos {
+		// Check for cancellation before waiting
+		select {
+		case <-done:
+			close(cancelCh)
+			b.condMu.Unlock()
 			return false
 		default:
 		}
 
-		// Check for data
-		if b.writePos.Load() > pos {
-			return true
-		}
-
-		// Tiny sleep to prevent CPU spin
-		// 500 microseconds = 0.5ms - fast enough for audio, light on CPU
-		time.Sleep(500 * time.Microsecond)
+		// Wait for broadcast (from Write or cancellation goroutine)
+		b.cond.Wait()
 	}
+
+	close(cancelCh)
+	b.condMu.Unlock()
+	return true
 }
 
 // WaitForDataWithDeadline waits for new data until deadline

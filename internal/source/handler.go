@@ -481,6 +481,11 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 
 	h.logger.Printf("DEBUG: streamFromConnection started for %s", mountPath)
 
+	// Timing debug: track gaps in source data
+	var lastReadTime time.Time
+	var maxGapMs int64
+	var gapCount int
+
 	// Set a generous read deadline to detect dead connections
 	// We'll reset this after each successful read
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -523,18 +528,36 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 	}
 
 	// Now read directly from the connection - BULLETPROOF version
+	lastReadTime = time.Now()
 	for mount.IsActive() {
 		// Reset read deadline before each read
 		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 		n, err := conn.Read(buf)
 		readCount++
+		now := time.Now()
+
+		// Track timing gaps in source data
+		if !lastReadTime.IsZero() && n > 0 {
+			gapMs := now.Sub(lastReadTime).Milliseconds()
+			if gapMs > maxGapMs {
+				maxGapMs = gapMs
+			}
+			// Log significant gaps (>100ms could indicate source issues)
+			if gapMs > 100 {
+				gapCount++
+				h.logger.Printf("WARNING: Source %s gap detected: %dms between reads (read #%d, %d bytes, total gaps: %d, max gap: %dms)",
+					mountPath, gapMs, readCount, n, gapCount, maxGapMs)
+			}
+		}
 
 		if readCount <= 10 || readCount%1000 == 0 {
-			h.logger.Printf("DEBUG: Source %s direct read #%d: %d bytes, err=%v", mountPath, readCount, n, err)
+			h.logger.Printf("DEBUG: Source %s direct read #%d: %d bytes, err=%v, maxGap=%dms, gapCount=%d",
+				mountPath, readCount, n, err, maxGapMs, gapCount)
 		}
 
 		if n > 0 {
+			lastReadTime = now
 			// Write immediately to buffer - this triggers instant broadcast to all listeners
 			_, writeErr := mount.WriteData(buf[:n])
 			if writeErr != nil {
@@ -559,7 +582,7 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 		}
 	}
 
-	h.logger.Printf("DEBUG: Source %s loop ended (mount inactive), %d total bytes", mountPath, totalBytes)
+	h.logger.Printf("DEBUG: Source %s loop ended (mount inactive), %d total bytes, maxGap=%dms, totalGaps=%d", mountPath, totalBytes, maxGapMs, gapCount)
 }
 
 // getClientIP extracts the client IP from the request
