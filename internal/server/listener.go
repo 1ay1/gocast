@@ -46,6 +46,15 @@ const (
 	// maxLagBytes: Maximum lag before disconnecting slow client
 	// Set to 75% of buffer size (10MB) to disconnect before skipping starts
 	maxLagBytes = 7864320 // 7.5MB = ~3.2 minutes at 320kbps
+
+	// softLagBytes: Soft threshold for skip-to-live recovery
+	// When lag exceeds this, we skip ahead to live edge instead of accumulating delay
+	// 512KB = ~13 seconds at 320kbps - noticeable but recoverable
+	softLagBytes = 524288
+
+	// lagCheckInterval: How often to check for lag recovery (in iterations)
+	// Check every 100 iterations (~1-2 seconds) to avoid overhead
+	lagCheckInterval = 100
 )
 
 // botUserAgents contains patterns for known bots/preview fetchers
@@ -401,6 +410,7 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	// metaByteCount and lastMeta are now initialized in burst phase above
 	// and continue to be used here for proper protocol continuity
 	iterationCount := 0
+	skipToLiveCount := 0 // Track how many times we've recovered via skip-to-live
 
 	for {
 		iterationCount++
@@ -439,6 +449,43 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			return
 		}
 
+		// SOFT LAG RECOVERY: Skip to live edge if lag is accumulating
+		// This prevents unbounded lag accumulation over long listening sessions (24h+)
+		// Only check periodically to avoid overhead
+		if iterationCount%lagCheckInterval == 0 && currentLag > softLagBytes {
+			// Find MP3 sync point near live edge for clean audio
+			newPos := writePos - int64(defaultBurstSize) // Start slightly behind live
+			if newPos < 0 {
+				newPos = 0
+			}
+
+			// Try to find MP3 frame boundary for clean skip
+			// Read a small chunk to find sync point
+			syncBuf := make([]byte, 4096)
+			n, syncPos := buffer.ReadFromInto(newPos, syncBuf)
+			if n > 4 {
+				if offset := findMP3Sync(syncBuf[:n]); offset > 0 && offset < n-4 {
+					newPos = syncPos - int64(n) + int64(offset)
+				}
+			}
+
+			skippedBytes := newPos - readPos
+			if skippedBytes > 0 {
+				skipToLiveCount++
+				h.logger.Printf("INFO: Listener %s skip-to-live recovery #%d: skipped %.1f seconds (lag was %.1f sec, now ~%.1f sec)",
+					listener.ID, skipToLiveCount,
+					float64(skippedBytes)/40000.0, // bytes to seconds at 320kbps
+					float64(currentLag)/40000.0,
+					float64(writePos-newPos)/40000.0)
+				readPos = newPos
+				totalSkipped += skippedBytes
+
+				// Reset ICY metadata state after skip to prevent protocol desync
+				// The next metadata block will be sent at the correct interval
+				metaByteCount = 0
+			}
+		}
+
 		// Read data from buffer using SafeReadFromInto to detect skipped bytes
 		n, newPos, skipped := buffer.SafeReadFromInto(readPos, readBuf)
 		if skipped > 0 {
@@ -453,8 +500,8 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 			// Much better than polling with time.Sleep!
 			if !buffer.WaitForDataContext(readPos, listener.Done()) {
 				// Client disconnected while waiting
-				h.logger.Printf("INFO: Listener %s disconnected (cancelled while waiting) after %v (sent: %d bytes, skipped: %d bytes, iterations: %d)",
-					listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, iterationCount)
+				h.logger.Printf("INFO: Listener %s disconnected (cancelled while waiting) after %v (sent: %d bytes, skipped: %d bytes, skip-to-live: %d, iterations: %d)",
+					listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, skipToLiveCount, iterationCount)
 				return
 			}
 			continue
@@ -472,8 +519,8 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		}
 
 		if err != nil {
-			h.logger.Printf("INFO: Listener %s disconnected after %v (sent: %d bytes, skipped: %d bytes, iterations: %d)",
-				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, iterationCount)
+			h.logger.Printf("INFO: Listener %s disconnected after %v (sent: %d bytes, skipped: %d bytes, skip-to-live: %d, iterations: %d)",
+				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, skipToLiveCount, iterationCount)
 			return
 		}
 
@@ -893,10 +940,19 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 			}
 			sb.WriteString(`","bitrate":`)
 			sb.WriteString(strconv.Itoa(stats.Metadata.Bitrate))
+			sb.WriteString(`,"genre":"`)
+			sb.WriteString(escapeJSON(stats.Metadata.Genre))
+			sb.WriteString(`","description":"`)
+			sb.WriteString(escapeJSON(stats.Metadata.Description))
+			sb.WriteString(`"`)
 
 			// Add metadata object with stream_title
 			sb.WriteString(`,"metadata":{"stream_title":"`)
 			sb.WriteString(escapeJSON(stats.Metadata.GetStreamTitle()))
+			sb.WriteString(`","artist":"`)
+			sb.WriteString(escapeJSON(stats.Metadata.Artist))
+			sb.WriteString(`","title":"`)
+			sb.WriteString(escapeJSON(stats.Metadata.Title))
 			sb.WriteString(`"}`)
 		}
 

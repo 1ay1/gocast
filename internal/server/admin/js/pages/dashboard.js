@@ -136,13 +136,21 @@ const DashboardPage = {
      */
     async init() {
         this._prevStats = null;
+        this._updatePending = false;
 
-        // Start periodic updates
+        // Create throttled update function to prevent rapid re-renders
+        this._throttledUpdate = UI.throttle(() => this.update(), 1000);
+
+        // Start periodic updates (slower interval since SSE provides real-time)
         this.update();
-        this._interval = setInterval(() => this.update(), 2000);
+        this._interval = setInterval(() => this._throttledUpdate(), 3000);
 
-        // Subscribe to real-time events
-        API.on("stats", (data) => this.handleStatsUpdate(data));
+        // Subscribe to real-time events (throttled to prevent flickering)
+        this._handleStatsThrottled = UI.throttle(
+            (data) => this.handleStatsUpdate(data),
+            500,
+        );
+        API.on("stats", this._handleStatsThrottled);
         API.on("listener", (data) => this.handleListenerEvent(data));
         API.on("source", (data) => this.handleSourceEvent(data));
 
@@ -179,7 +187,7 @@ const DashboardPage = {
     },
 
     /**
-     * Update statistics display
+     * Update statistics display (ANTI-FLICKER: uses smart text updates)
      */
     updateStats(status) {
         const mounts = status.mounts || [];
@@ -195,39 +203,35 @@ const DashboardPage = {
             if (mount.active) activeStreams++;
         });
 
-        // Update display
-        const listenersEl = UI.$("totalListeners");
-        if (listenersEl) listenersEl.textContent = totalListeners;
-
-        const activeEl = UI.$("activeStreams");
-        if (activeEl) activeEl.textContent = activeStreams;
-
-        const totalMountsEl = UI.$("totalMounts");
-        if (totalMountsEl) totalMountsEl.textContent = mounts.length;
-
-        const peakEl = UI.$("peakListeners");
-        if (peakEl) peakEl.textContent = peakListeners;
+        // Update display using smart text updates (only changes DOM if value differs)
+        UI.updateText("totalListeners", String(totalListeners));
+        UI.updateText("activeStreams", String(activeStreams));
+        UI.updateText("totalMounts", String(mounts.length));
+        UI.updateText("peakListeners", String(peakListeners));
 
         // Update bandwidth display - show expected bandwidth based on bitrate × listeners
-        // This is more meaningful than actual bytes (which depends on client buffering)
-        const bandwidthEl = UI.$("totalBandwidth");
-        if (bandwidthEl) {
-            // Calculate expected bandwidth from active mounts
-            let expectedBandwidth = 0;
-            mounts.forEach((mount) => {
-                if (mount.active && mount.listeners > 0) {
-                    // bitrate is in kbps, convert to bytes/sec
-                    const mountBitrate = ((mount.bitrate || 128) * 1000) / 8;
-                    expectedBandwidth += mountBitrate * mount.listeners;
-                }
-            });
-            bandwidthEl.textContent = this.formatBandwidth(expectedBandwidth);
-        }
+        let expectedBandwidth = 0;
+        mounts.forEach((mount) => {
+            if (mount.active && mount.listeners > 0) {
+                // bitrate is in kbps, convert to bytes/sec
+                const mountBitrate = ((mount.bitrate || 128) * 1000) / 8;
+                expectedBandwidth += mountBitrate * mount.listeners;
+            }
+        });
+        UI.updateText(
+            "totalBandwidth",
+            this.formatBandwidth(expectedBandwidth),
+        );
 
+        // Update live count badge
         const liveCountEl = UI.$("liveCount");
         if (liveCountEl) {
-            liveCountEl.textContent = `${activeStreams} Live`;
-            liveCountEl.className = `badge ${activeStreams > 0 ? "badge-success" : "badge-neutral"}`;
+            const newText = `${activeStreams} Live`;
+            const newClass = `badge ${activeStreams > 0 ? "badge-success" : "badge-neutral"}`;
+            UI.updateText(liveCountEl, newText);
+            if (liveCountEl.className !== newClass) {
+                liveCountEl.className = newClass;
+            }
         }
 
         // Update health indicators
@@ -263,65 +267,104 @@ const DashboardPage = {
             if (mount.active) activeSources++;
         });
 
-        // Connections
+        // Connections - use smart updates
         const connPercent = (totalListeners / maxClients) * 100;
-        const connValue = UI.$("connValue");
+        UI.updateText("connValue", `${totalListeners} / ${maxClients}`);
+
         const connProgress = UI.$("connProgress");
-        if (connValue)
-            connValue.textContent = `${totalListeners} / ${maxClients}`;
         if (connProgress) {
-            connProgress.innerHTML = UI.progressBar(
+            const newProgressHTML = UI.progressBar(
                 connPercent,
                 connPercent > 80 ? "warning" : "",
             );
+            UI.updateHTML(connProgress, newProgressHTML);
         }
 
-        // Sources
+        // Sources - use smart updates
         const srcPercent = (activeSources / maxSources) * 100;
-        const srcValue = UI.$("srcValue");
+        UI.updateText("srcValue", `${activeSources} / ${maxSources}`);
+
         const srcProgress = UI.$("srcProgress");
-        if (srcValue) srcValue.textContent = `${activeSources} / ${maxSources}`;
         if (srcProgress) {
-            srcProgress.innerHTML = UI.progressBar(
+            const newProgressHTML = UI.progressBar(
                 srcPercent,
                 srcPercent > 80 ? "warning" : "",
             );
+            UI.updateHTML(srcProgress, newProgressHTML);
         }
     },
 
     /**
-     * Update streams list
+     * Update streams list (ANTI-FLICKER: smart DOM updates)
+     * Only updates elements that have actually changed
      */
     updateStreamsList(mounts) {
         const container = UI.$("streamsList");
         if (!container) return;
 
+        // Handle empty state
         if (mounts.length === 0) {
-            container.innerHTML = `
+            const emptyHTML = `
                 <div class="empty-state">
                     <div class="empty-icon">📡</div>
                     <div class="empty-title">No Streams Configured</div>
                     <div class="empty-text">Add mount points in the Mounts section</div>
                 </div>
             `;
+            UI.updateHTML(container, emptyHTML);
             return;
         }
 
+        // Sort: active first, then by listeners, then by path for stability
         const activeFirst = [...mounts].sort((a, b) => {
-            // Live streams always first
             if (a.active && !b.active) return -1;
             if (!a.active && b.active) return 1;
-            // Then by listener count (descending)
             const listenerDiff = (b.listeners || 0) - (a.listeners || 0);
             if (listenerDiff !== 0) return listenerDiff;
-            // Stable sort by path for consistent ordering
             return (a.path || "").localeCompare(b.path || "");
         });
 
-        container.innerHTML = activeFirst
+        // Check if we already have stream cards - if so, update in place
+        const existingCards = container.querySelectorAll(".stream-card");
+        const existingPaths = new Set();
+        existingCards.forEach((card) => {
+            const pathEl = card.querySelector(".stream-path");
+            if (pathEl) existingPaths.add(pathEl.textContent);
+        });
+
+        // Build a signature of current state to detect if rebuild is needed
+        const currentSignature = activeFirst
             .map(
-                (mount) => `
-            <div class="stream-card ${mount.active ? "live" : ""}" style="margin-bottom: 12px;">
+                (m) =>
+                    `${m.path}:${m.active}:${m.listeners}:${m.peak}:${m.metadata?.stream_title || ""}`,
+            )
+            .join("|");
+
+        // Store signature to avoid unnecessary rebuilds
+        if (container.dataset.signature === currentSignature) {
+            return; // No changes, skip update entirely
+        }
+        container.dataset.signature = currentSignature;
+
+        // For now, rebuild but use requestAnimationFrame to batch the update
+        requestAnimationFrame(() => {
+            container.innerHTML = activeFirst
+                .map((mount) => this.renderStreamCard(mount))
+                .join("");
+        });
+    },
+
+    /**
+     * Render a single stream card (extracted for reuse)
+     */
+    renderStreamCard(mount) {
+        const nowPlaying =
+            mount.metadata && mount.metadata.stream_title
+                ? UI.escapeHtml(mount.metadata.stream_title)
+                : '<span style="color: #666; font-style: italic;">No song info</span>';
+
+        return `
+            <div class="stream-card ${mount.active ? "live" : ""}" style="margin-bottom: 12px;" data-path="${UI.escapeHtml(mount.path)}">
                 <div class="stream-header">
                     <div class="stream-info">
                         <div class="stream-icon">${mount.active ? "🔴" : "⚫"}</div>
@@ -352,7 +395,7 @@ const DashboardPage = {
                             ? `
                     <div class="stream-nowplaying" style="margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px;">
                         <span style="color: #888; font-size: 11px;">🎵 Now Playing:</span>
-                        <div style="color: #fff; font-size: 13px; margin-top: 2px;">${mount.metadata && mount.metadata.stream_title ? UI.escapeHtml(mount.metadata.stream_title) : '<span style="color: #666; font-style: italic;">No song info</span>'}</div>
+                        <div style="color: #fff; font-size: 13px; margin-top: 2px;">${nowPlaying}</div>
                     </div>
                     `
                             : ""
@@ -373,9 +416,7 @@ const DashboardPage = {
                         : ""
                 }
             </div>
-        `,
-            )
-            .join("");
+        `;
     },
 
     /**

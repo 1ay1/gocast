@@ -1,17 +1,28 @@
 /**
  * GoCast Admin - Streams Page
  * Live stream monitoring and management
+ *
+ * ANTI-FLICKER DESIGN:
+ * 1. Signature-based change detection
+ * 2. Throttled updates
+ * 3. Smart DOM manipulation
  */
 
 const StreamsPage = {
-  // Update interval
-  _interval: null,
+    // Update interval
+    _interval: null,
 
-  /**
-   * Render the streams page
-   */
-  render() {
-    return `
+    // Last data signature for change detection
+    _lastSignature: null,
+
+    // Throttled refresh
+    _throttledRefresh: null,
+
+    /**
+     * Render the streams page
+     */
+    render() {
+        return `
             <div class="flex justify-between items-center mb-3">
                 <div class="flex gap-2">
                     <button class="btn btn-secondary ${this._filter === "all" ? "active" : ""}" onclick="StreamsPage.setFilter('all')">
@@ -33,89 +44,112 @@ const StreamsPage = {
                 </div>
             </div>
         `;
-  },
+    },
 
-  // Current filter
-  _filter: "all",
+    // Current filter
+    _filter: "all",
 
-  /**
-   * Initialize the page
-   */
-  async init() {
-    this._filter = "all";
-    await this.refresh();
-    this._interval = setInterval(() => this.refresh(), 3000);
+    /**
+     * Initialize the page
+     */
+    async init() {
+        this._filter = "all";
+        this._lastSignature = null;
 
-    // Subscribe to real-time events
-    API.on("source", () => this.refresh());
-    API.on("stats", (data) => this.handleStatsUpdate(data));
-  },
+        // Create throttled refresh to prevent rapid updates
+        this._throttledRefresh = UI.throttle(() => this.refresh(), 1000);
 
-  /**
-   * Clean up when leaving page
-   */
-  destroy() {
-    if (this._interval) {
-      clearInterval(this._interval);
-      this._interval = null;
-    }
-  },
+        await this.refresh();
+        this._interval = setInterval(() => this._throttledRefresh(), 3000);
 
-  /**
-   * Set filter mode
-   */
-  setFilter(filter) {
-    this._filter = filter;
-    this.refresh();
-  },
+        // Subscribe to real-time events (throttled)
+        API.on("source", () => this._throttledRefresh());
+        API.on("stats", (data) => this.handleStatsUpdate(data));
+    },
 
-  /**
-   * Refresh streams data
-   */
-  async refresh() {
-    try {
-      const status = await API.getStatus();
-      this.renderStreams(status.mounts || []);
-    } catch (err) {
-      console.error("Streams refresh error:", err);
-      UI.error("Failed to load streams");
-    }
-  },
+    /**
+     * Clean up when leaving page
+     */
+    destroy() {
+        if (this._interval) {
+            clearInterval(this._interval);
+            this._interval = null;
+        }
+        this._lastSignature = null;
+        this._throttledRefresh = null;
+    },
 
-  /**
-   * Handle real-time stats update
-   */
-  handleStatsUpdate(data) {
-    if (data.mounts) {
-      this.renderStreams(data.mounts);
-    }
-  },
+    /**
+     * Set filter mode
+     */
+    setFilter(filter) {
+        this._filter = filter;
+        this._lastSignature = null; // Force re-render on filter change
+        this.refresh();
+    },
 
-  /**
-   * Render streams list
-   */
-  renderStreams(mounts) {
-    const container = UI.$("streamsContainer");
-    if (!container) return;
+    /**
+     * Refresh streams data
+     */
+    async refresh() {
+        try {
+            const status = await API.getStatus();
+            this.renderStreams(status.mounts || []);
+        } catch (err) {
+            console.error("Streams refresh error:", err);
+            UI.error("Failed to load streams");
+        }
+    },
 
-    // Apply filter
-    let filtered = mounts;
-    if (this._filter === "live") {
-      filtered = mounts.filter((m) => m.active);
-    }
+    /**
+     * Handle real-time stats update
+     */
+    handleStatsUpdate(data) {
+        if (data.mounts) {
+            this.renderStreams(data.mounts);
+        }
+    },
 
-    // Sort: active first, then by listeners, then by path (for stable ordering)
-    filtered.sort((a, b) => {
-      if (a.active && !b.active) return -1;
-      if (!a.active && b.active) return 1;
-      const listenerDiff = (b.listeners || 0) - (a.listeners || 0);
-      if (listenerDiff !== 0) return listenerDiff;
-      // Stable sort by path when everything else is equal
-      return (a.path || "").localeCompare(b.path || "");
-    });
+    /**
+     * Render streams list (ANTI-FLICKER: uses signature-based change detection)
+     */
+    renderStreams(mounts) {
+        const container = UI.$("streamsContainer");
+        if (!container) return;
 
-    if (filtered.length === 0) {
-      container.innerHTML = `
+        // Apply filter
+        let filtered = mounts;
+        if (this._filter === "live") {
+            filtered = mounts.filter((m) => m.active);
+        }
+
+        // Sort: active first, then by listeners, then by path (for stable ordering)
+        filtered.sort((a, b) => {
+            if (a.active && !b.active) return -1;
+            if (!a.active && b.active) return 1;
+            const listenerDiff = (b.listeners || 0) - (a.listeners || 0);
+            if (listenerDiff !== 0) return listenerDiff;
+            // Stable sort by path when everything else is equal
+            return (a.path || "").localeCompare(b.path || "");
+        });
+
+        // Build signature to detect changes
+        const signature =
+            filtered
+                .map(
+                    (m) =>
+                        `${m.path}:${m.active}:${m.listeners}:${m.peak}:${m.bitrate}`,
+                )
+                .join("|") + `|filter:${this._filter}`;
+
+        // Skip update if nothing changed
+        if (this._lastSignature === signature) {
+            return;
+        }
+        this._lastSignature = signature;
+
+        if (filtered.length === 0) {
+            const emptyHTML = `
                 <div class="empty-state">
                     <div class="empty-icon">${this._filter === "live" ? "🔴" : "📡"}</div>
                     <div class="empty-title">${this._filter === "live" ? "No Live Streams" : "No Streams Found"}</div>
@@ -124,28 +158,32 @@ const StreamsPage = {
                     </div>
                 </div>
             `;
-      return;
-    }
+            UI.updateHTML(container, emptyHTML);
+            return;
+        }
 
-    container.innerHTML = `
+        // Use requestAnimationFrame to batch DOM update
+        requestAnimationFrame(() => {
+            container.innerHTML = `
             <div class="grid grid-2">
                 ${filtered.map((mount) => this.renderStreamCard(mount)).join("")}
             </div>
         `;
-  },
+        });
+    },
 
-  /**
-   * Render a single stream card
-   */
-  renderStreamCard(mount) {
-    const isLive = mount.active;
-    const listeners = mount.listeners || 0;
-    const peak = mount.peak || 0;
-    const bitrate = mount.bitrate || 128;
-    const genre = mount.genre || "Unknown";
-    const name = mount.name || mount.path;
+    /**
+     * Render a single stream card
+     */
+    renderStreamCard(mount) {
+        const isLive = mount.active;
+        const listeners = mount.listeners || 0;
+        const peak = mount.peak || 0;
+        const bitrate = mount.bitrate || 128;
+        const genre = mount.genre || "Unknown";
+        const name = mount.name || mount.path;
 
-    return `
+        return `
             <div class="stream-card ${isLive ? "live" : ""}">
                 <div class="stream-header">
                     <div class="stream-info">
@@ -175,8 +213,8 @@ const StreamsPage = {
                     </div>
 
                     ${
-                      isLive
-                        ? `
+                        isLive
+                            ? `
                     <div class="mt-2">
                         <div class="flex justify-between mb-1">
                             <span class="text-muted">Genre</span>
@@ -184,7 +222,7 @@ const StreamsPage = {
                         </div>
                     </div>
                     `
-                        : ""
+                            : ""
                     }
                 </div>
 
@@ -193,8 +231,8 @@ const StreamsPage = {
                         📋 Copy URL
                     </button>
                     ${
-                      isLive
-                        ? `
+                        isLive
+                            ? `
                         <button class="btn btn-sm btn-secondary" onclick="StreamsPage.viewListeners('${mount.path}')">
                             👥 ${listeners} Listeners
                         </button>
@@ -205,7 +243,7 @@ const StreamsPage = {
                             ⏹️ Stop
                         </button>
                     `
-                        : `
+                            : `
                         <button class="btn btn-sm btn-secondary" onclick="StreamsPage.editMount('${mount.path}')" disabled>
                             ⚙️ Configure
                         </button>
@@ -214,67 +252,67 @@ const StreamsPage = {
                 </div>
             </div>
         `;
-  },
+    },
 
-  /**
-   * Copy stream URL to clipboard
-   */
-  copyStreamUrl(path) {
-    const url = `${window.location.origin}${path}`;
-    navigator.clipboard
-      .writeText(url)
-      .then(() => {
-        UI.success("Stream URL copied to clipboard");
-      })
-      .catch(() => {
-        UI.error("Failed to copy URL");
-      });
-  },
+    /**
+     * Copy stream URL to clipboard
+     */
+    copyStreamUrl(path) {
+        const url = `${window.location.origin}${path}`;
+        navigator.clipboard
+            .writeText(url)
+            .then(() => {
+                UI.success("Stream URL copied to clipboard");
+            })
+            .catch(() => {
+                UI.error("Failed to copy URL");
+            });
+    },
 
-  /**
-   * Open stream in new tab for listening
-   */
-  listenToStream(path) {
-    window.open(path, "_blank");
-  },
+    /**
+     * Open stream in new tab for listening
+     */
+    listenToStream(path) {
+        window.open(path, "_blank");
+    },
 
-  /**
-   * View listeners for a stream
-   */
-  viewListeners(path) {
-    App.navigateTo("listeners", { mount: path });
-  },
+    /**
+     * View listeners for a stream
+     */
+    viewListeners(path) {
+        App.navigateTo("listeners", { mount: path });
+    },
 
-  /**
-   * Navigate to mount config
-   */
-  editMount(path) {
-    App.navigateTo("mounts", { edit: path });
-  },
+    /**
+     * Navigate to mount config
+     */
+    editMount(path) {
+        App.navigateTo("mounts", { edit: path });
+    },
 
-  /**
-   * Stop a source
-   */
-  async killSource(path) {
-    const confirmed = await UI.confirm(
-      `Are you sure you want to stop the source on ${path}? This will disconnect the broadcaster and all listeners.`,
-      {
-        title: "Stop Source",
-        confirmText: "Stop Source",
-        danger: true,
-      },
-    );
+    /**
+     * Stop a source
+     */
+    async killSource(path) {
+        const confirmed = await UI.confirm(
+            `Are you sure you want to stop the source on ${path}? This will disconnect the broadcaster and all listeners.`,
+            {
+                title: "Stop Source",
+                confirmText: "Stop Source",
+                danger: true,
+            },
+        );
 
-    if (confirmed) {
-      try {
-        await API.killSource(path);
-        UI.success(`Source stopped on ${path}`);
-        await this.refresh();
-      } catch (err) {
-        UI.error("Failed to stop source: " + err.message);
-      }
-    }
-  },
+        if (confirmed) {
+            try {
+                await API.killSource(path);
+                UI.success(`Source stopped on ${path}`);
+                await this.refresh();
+            } catch (err) {
+                UI.error("Failed to stop source: " + err.message);
+            }
+        }
+    },
 };
 
 // Export for use in app

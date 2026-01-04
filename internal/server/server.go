@@ -1147,8 +1147,9 @@ func (s *Server) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 		defer s.logBuffer.Unsubscribe(logCh)
 	}
 
-	// Create ticker for stats updates (every 500ms for smooth updates)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	// Create ticker for stats updates (every 1s to reduce lock contention with streaming)
+	// Previously 500ms was causing lock contention when admin panel was active
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	// Keep connection open and send updates

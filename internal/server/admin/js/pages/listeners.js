@@ -1,24 +1,35 @@
 /**
  * GoCast Admin - Listeners Page
  * View and manage connected listeners across all mounts
+ *
+ * ANTI-FLICKER DESIGN:
+ * 1. Smart DOM updates - only update changed elements
+ * 2. Throttled refresh to prevent rapid re-renders
+ * 3. Cache comparison before DOM manipulation
  */
 
 const ListenersPage = {
-  // Current filter
-  _mountFilter: null,
+    // Current filter
+    _mountFilter: null,
 
-  // Update interval
-  _interval: null,
+    // Update interval
+    _interval: null,
 
-  // Cached data
-  _streams: [],
-  _listeners: [],
+    // Cached data
+    _streams: [],
+    _listeners: [],
 
-  /**
-   * Render the listeners page
-   */
-  render() {
-    return `
+    // Last data signature to detect changes
+    _lastSignature: null,
+
+    // Throttled refresh function
+    _throttledRefresh: null,
+
+    /**
+     * Render the listeners page
+     */
+    render() {
+        return `
             <div class="flex justify-between items-center mb-3">
                 <div class="flex gap-2 items-center">
                     <label class="form-label" style="margin: 0;">Filter by Mount:</label>
@@ -83,240 +94,264 @@ const ListenersPage = {
                 </div>
             </div>
         `;
-  },
+    },
 
-  /**
-   * Initialize the page
-   */
-  async init() {
-    // Check for mount filter from navigation params
-    const params = App.getPageParams();
-    if (params && params.mount) {
-      this._mountFilter = params.mount;
-    }
+    /**
+     * Initialize the page
+     */
+    async init() {
+        // Check for mount filter from navigation params
+        const params = App.getPageParams();
+        if (params && params.mount) {
+            this._mountFilter = params.mount;
+        }
 
-    await this.refresh();
-    this._interval = setInterval(() => this.refresh(), 5000);
+        // Create throttled refresh to prevent rapid updates
+        this._throttledRefresh = UI.throttle(() => this.refresh(), 2000);
 
-    // Subscribe to real-time events
-    API.on("listener", () => this.refresh());
-  },
+        await this.refresh();
+        this._interval = setInterval(() => this._throttledRefresh(), 5000);
 
-  /**
-   * Clean up when leaving page
-   */
-  destroy() {
-    if (this._interval) {
-      clearInterval(this._interval);
-      this._interval = null;
-    }
-    this._mountFilter = null;
-  },
+        // Subscribe to real-time events (throttled)
+        API.on("listener", () => this._throttledRefresh());
+    },
 
-  /**
-   * Set mount filter
-   */
-  setMountFilter(mount) {
-    this._mountFilter = mount || null;
-    this.renderListeners();
-  },
+    /**
+     * Clean up when leaving page
+     */
+    destroy() {
+        if (this._interval) {
+            clearInterval(this._interval);
+            this._interval = null;
+        }
+        this._mountFilter = null;
+        this._lastSignature = null;
+        this._throttledRefresh = null;
+    },
 
-  /**
-   * Refresh data
-   */
-  async refresh() {
-    try {
-      // Get status for mount list
-      const status = await API.getStatus();
-      this._streams = status.mounts || [];
+    /**
+     * Set mount filter
+     */
+    setMountFilter(mount) {
+        this._mountFilter = mount || null;
+        this.renderListeners();
+    },
 
-      // Update mount filter dropdown
-      this.updateMountDropdown();
+    /**
+     * Refresh data
+     */
+    async refresh() {
+        try {
+            // Get status for mount list
+            const status = await API.getStatus();
+            this._streams = status.mounts || [];
 
-      // Fetch listeners for each active mount
-      await this.fetchAllListeners();
+            // Update mount filter dropdown
+            this.updateMountDropdown();
 
-      // Update stats
-      this.updateStats();
+            // Fetch listeners for each active mount
+            await this.fetchAllListeners();
 
-      // Render listeners table
-      this.renderListeners();
-    } catch (err) {
-      console.error("Listeners refresh error:", err);
-    }
-  },
+            // Update stats
+            this.updateStats();
 
-  /**
-   * Update mount dropdown options
-   */
-  updateMountDropdown() {
-    const select = UI.$("mountFilter");
-    if (!select) return;
+            // Render listeners table
+            this.renderListeners();
+        } catch (err) {
+            console.error("Listeners refresh error:", err);
+        }
+    },
 
-    const currentValue = select.value;
+    /**
+     * Update mount dropdown options
+     */
+    updateMountDropdown() {
+        const select = UI.$("mountFilter");
+        if (!select) return;
 
-    // Build options
-    let options = '<option value="">All Mounts</option>';
-    this._streams.forEach((stream) => {
-      const selected = stream.path === this._mountFilter ? "selected" : "";
-      const listeners = stream.listeners || 0;
-      options += `<option value="${stream.path}" ${selected}>${stream.path} (${listeners})</option>`;
-    });
+        const currentValue = select.value;
 
-    select.innerHTML = options;
+        // Build options
+        let options = '<option value="">All Mounts</option>';
+        this._streams.forEach((stream) => {
+            const selected =
+                stream.path === this._mountFilter ? "selected" : "";
+            const listeners = stream.listeners || 0;
+            options += `<option value="${stream.path}" ${selected}>${stream.path} (${listeners})</option>`;
+        });
 
-    // Restore selection
-    if (this._mountFilter) {
-      select.value = this._mountFilter;
-    }
-  },
+        select.innerHTML = options;
 
-  /**
-   * Fetch listeners from all active mounts
-   */
-  async fetchAllListeners() {
-    this._listeners = [];
+        // Restore selection
+        if (this._mountFilter) {
+            select.value = this._mountFilter;
+        }
+    },
 
-    const activeMounts = this._streams.filter((s) => s.active);
+    /**
+     * Fetch listeners from all active mounts
+     */
+    async fetchAllListeners() {
+        this._listeners = [];
 
-    for (const mount of activeMounts) {
-      try {
-        const response = await API.listClients(mount.path);
-        // Parse XML response or handle JSON
-        const listeners = this.parseListenersResponse(response, mount.path);
-        this._listeners.push(...listeners);
-      } catch (err) {
-        console.error(`Error fetching listeners for ${mount.path}:`, err);
-      }
-    }
-  },
+        const activeMounts = this._streams.filter((s) => s.active);
 
-  /**
-   * Parse listeners response (handles both XML and JSON)
-   */
-  parseListenersResponse(response, mountPath) {
-    // If it's already an array, use it directly
-    if (Array.isArray(response)) {
-      return response.map((l) => ({ ...l, mount: mountPath }));
-    }
+        for (const mount of activeMounts) {
+            try {
+                const response = await API.listClients(mount.path);
+                // Parse XML response or handle JSON
+                const listeners = this.parseListenersResponse(
+                    response,
+                    mount.path,
+                );
+                this._listeners.push(...listeners);
+            } catch (err) {
+                console.error(
+                    `Error fetching listeners for ${mount.path}:`,
+                    err,
+                );
+            }
+        }
+    },
 
-    // If it's an object with listeners property (new JSON format)
-    if (response && response.listeners && Array.isArray(response.listeners)) {
-      return response.listeners.map((l) => ({
-        id: l.id,
-        ip: l.ip,
-        userAgent: l.user_agent,
-        connected: String(l.connected),
-        connections: l.connections || 1,
-        ids: l.ids || [l.id],
-        mount: mountPath,
-      }));
-    }
+    /**
+     * Parse listeners response (handles both XML and JSON)
+     */
+    parseListenersResponse(response, mountPath) {
+        // If it's already an array, use it directly
+        if (Array.isArray(response)) {
+            return response.map((l) => ({ ...l, mount: mountPath }));
+        }
 
-    // If it's an object with data property
-    if (response && response.data && Array.isArray(response.data)) {
-      return response.data.map((l) => ({ ...l, mount: mountPath }));
-    }
+        // If it's an object with listeners property (new JSON format)
+        if (
+            response &&
+            response.listeners &&
+            Array.isArray(response.listeners)
+        ) {
+            return response.listeners.map((l) => ({
+                id: l.id,
+                ip: l.ip,
+                userAgent: l.user_agent,
+                connected: String(l.connected),
+                connections: l.connections || 1,
+                ids: l.ids || [l.id],
+                mount: mountPath,
+            }));
+        }
 
-    // Try to parse XML string
-    if (typeof response === "string" && response.includes("<")) {
-      return this.parseXMLListeners(response, mountPath);
-    }
+        // If it's an object with data property
+        if (response && response.data && Array.isArray(response.data)) {
+            return response.data.map((l) => ({ ...l, mount: mountPath }));
+        }
 
-    return [];
-  },
+        // Try to parse XML string
+        if (typeof response === "string" && response.includes("<")) {
+            return this.parseXMLListeners(response, mountPath);
+        }
 
-  /**
-   * Parse XML listeners response
-   */
-  parseXMLListeners(xml, mountPath) {
-    const listeners = [];
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xml, "text/xml");
-    const clients = doc.querySelectorAll("listener");
+        return [];
+    },
 
-    clients.forEach((client) => {
-      listeners.push({
-        id:
-          client.querySelector("ID")?.textContent ||
-          client.querySelector("id")?.textContent ||
-          "",
-        ip:
-          client.querySelector("IP")?.textContent ||
-          client.querySelector("ip")?.textContent ||
-          "",
-        userAgent:
-          client.querySelector("UserAgent")?.textContent ||
-          client.querySelector("user_agent")?.textContent ||
-          "",
-        connected:
-          client.querySelector("Connected")?.textContent ||
-          client.querySelector("connected")?.textContent ||
-          "0",
-        mount: mountPath,
-      });
-    });
+    /**
+     * Parse XML listeners response
+     */
+    parseXMLListeners(xml, mountPath) {
+        const listeners = [];
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(xml, "text/xml");
+        const clients = doc.querySelectorAll("listener");
 
-    return listeners;
-  },
+        clients.forEach((client) => {
+            listeners.push({
+                id:
+                    client.querySelector("ID")?.textContent ||
+                    client.querySelector("id")?.textContent ||
+                    "",
+                ip:
+                    client.querySelector("IP")?.textContent ||
+                    client.querySelector("ip")?.textContent ||
+                    "",
+                userAgent:
+                    client.querySelector("UserAgent")?.textContent ||
+                    client.querySelector("user_agent")?.textContent ||
+                    "",
+                connected:
+                    client.querySelector("Connected")?.textContent ||
+                    client.querySelector("connected")?.textContent ||
+                    "0",
+                mount: mountPath,
+            });
+        });
 
-  /**
-   * Update statistics
-   */
-  updateStats() {
-    // Get filtered listeners
-    const listeners = this._mountFilter
-      ? this._listeners.filter((l) => l.mount === this._mountFilter)
-      : this._listeners;
+        return listeners;
+    },
 
-    // Total listeners
-    const totalEl = UI.$("totalListenerCount");
-    if (totalEl) totalEl.textContent = listeners.length;
+    /**
+     * Update statistics (ANTI-FLICKER: uses smart text updates)
+     */
+    updateStats() {
+        // Get filtered listeners
+        const listeners = this._mountFilter
+            ? this._listeners.filter((l) => l.mount === this._mountFilter)
+            : this._listeners;
 
-    // Active mounts
-    const activeMounts = this._streams.filter((s) => s.active).length;
-    const activeMountsEl = UI.$("activeMountCount");
-    if (activeMountsEl) activeMountsEl.textContent = activeMounts;
+        // Total listeners - use smart update
+        UI.updateText("totalListenerCount", String(listeners.length));
 
-    // Unique IPs
-    const uniqueIPs = new Set(listeners.map((l) => l.ip)).size;
-    const uniqueIPsEl = UI.$("uniqueIPs");
-    if (uniqueIPsEl) uniqueIPsEl.textContent = uniqueIPs;
+        // Active mounts
+        const activeMounts = this._streams.filter((s) => s.active).length;
+        UI.updateText("activeMountCount", String(activeMounts));
 
-    // Average listen time
-    if (listeners.length > 0) {
-      const totalSeconds = listeners.reduce(
-        (sum, l) => sum + (parseInt(l.connected) || 0),
-        0,
-      );
-      const avgSeconds = Math.floor(totalSeconds / listeners.length);
-      const avgTimeEl = UI.$("avgListenTime");
-      if (avgTimeEl) avgTimeEl.textContent = UI.formatDuration(avgSeconds);
-    }
+        // Unique IPs
+        const uniqueIPs = new Set(listeners.map((l) => l.ip)).size;
+        UI.updateText("uniqueIPs", String(uniqueIPs));
 
-    // Update badge
-    const badge = UI.$("listenerCountBadge");
-    if (badge) badge.textContent = listeners.length;
+        // Average listen time
+        if (listeners.length > 0) {
+            const totalSeconds = listeners.reduce(
+                (sum, l) => sum + (parseInt(l.connected) || 0),
+                0,
+            );
+            const avgSeconds = Math.floor(totalSeconds / listeners.length);
+            UI.updateText("avgListenTime", UI.formatDuration(avgSeconds));
+        } else {
+            UI.updateText("avgListenTime", "--:--");
+        }
 
-    // Enable/disable kick all button
-    const kickAllBtn = UI.$("kickAllBtn");
-    if (kickAllBtn) kickAllBtn.disabled = listeners.length === 0;
-  },
+        // Update badge
+        UI.updateText("listenerCountBadge", String(listeners.length));
 
-  /**
-   * Render listeners table
-   */
-  renderListeners() {
-    const container = UI.$("listenersContainer");
-    if (!container) return;
+        // Enable/disable kick all button
+        const kickAllBtn = UI.$("kickAllBtn");
+        if (kickAllBtn) kickAllBtn.disabled = listeners.length === 0;
+    },
 
-    // Get filtered listeners
-    const listeners = this._mountFilter
-      ? this._listeners.filter((l) => l.mount === this._mountFilter)
-      : this._listeners;
+    /**
+     * Render listeners table (ANTI-FLICKER: smart DOM updates)
+     */
+    renderListeners() {
+        const container = UI.$("listenersContainer");
+        if (!container) return;
 
-    if (listeners.length === 0) {
-      container.innerHTML = `
+        // Get filtered listeners
+        const listeners = this._mountFilter
+            ? this._listeners.filter((l) => l.mount === this._mountFilter)
+            : this._listeners;
+
+        // Build signature to detect changes
+        const signature = listeners
+            .map((l) => `${l.id}:${l.ip}:${l.connected}:${l.mount}`)
+            .join("|");
+
+        // Skip update if nothing changed
+        if (this._lastSignature === signature) {
+            return;
+        }
+        this._lastSignature = signature;
+
+        if (listeners.length === 0) {
+            const emptyHTML = `
                 <div class="empty-state">
                     <div class="empty-icon">👥</div>
                     <div class="empty-title">No Listeners Connected</div>
@@ -325,15 +360,19 @@ const ListenersPage = {
                     </div>
                 </div>
             `;
-      return;
-    }
+            UI.updateHTML(container, emptyHTML);
+            return;
+        }
 
-    // Sort by connected time (longest first)
-    listeners.sort(
-      (a, b) => (parseInt(b.connected) || 0) - (parseInt(a.connected) || 0),
-    );
+        // Sort by connected time (longest first)
+        listeners.sort(
+            (a, b) =>
+                (parseInt(b.connected) || 0) - (parseInt(a.connected) || 0),
+        );
 
-    container.innerHTML = `
+        // Use requestAnimationFrame to batch DOM update
+        requestAnimationFrame(() => {
+            container.innerHTML = `
             <div class="table-container">
                 <table class="table">
                     <thead>
@@ -351,28 +390,31 @@ const ListenersPage = {
                 </table>
             </div>
         `;
-  },
+        });
+    },
 
-  /**
-   * Render a single listener row
-   */
-  renderListenerRow(listener) {
-    const connected = parseInt(listener.connected) || 0;
-    const duration = UI.formatDuration(connected);
+    /**
+     * Render a single listener row
+     */
+    renderListenerRow(listener) {
+        const connected = parseInt(listener.connected) || 0;
+        const duration = UI.formatDuration(connected);
 
-    // Truncate user agent for display
-    const userAgent = listener.userAgent || "Unknown";
-    const shortUA =
-      userAgent.length > 50 ? userAgent.substring(0, 50) + "..." : userAgent;
+        // Truncate user agent for display
+        const userAgent = listener.userAgent || "Unknown";
+        const shortUA =
+            userAgent.length > 50
+                ? userAgent.substring(0, 50) + "..."
+                : userAgent;
 
-    // Show connection count if more than 1
-    const connections = listener.connections || 1;
-    const connBadge =
-      connections > 1
-        ? `<span class="badge badge-neutral" title="${connections} browser connections">${connections}x</span>`
-        : "";
+        // Show connection count if more than 1
+        const connections = listener.connections || 1;
+        const connBadge =
+            connections > 1
+                ? `<span class="badge badge-neutral" title="${connections} browser connections">${connections}x</span>`
+                : "";
 
-    return `
+        return `
             <tr>
                 <td class="mono">${UI.escapeHtml(listener.ip || "Unknown")} ${connBadge}</td>
                 <td class="mono">${UI.escapeHtml(listener.mount)}</td>
@@ -385,70 +427,70 @@ const ListenersPage = {
                 </td>
             </tr>
         `;
-  },
+    },
 
-  /**
-   * Kick a single listener
-   */
-  async kickListener(mount, listenerId) {
-    const confirmed = await UI.confirm(
-      "Are you sure you want to disconnect this listener?",
-      {
-        title: "Kick Listener",
-        confirmText: "Kick",
-        danger: true,
-      },
-    );
+    /**
+     * Kick a single listener
+     */
+    async kickListener(mount, listenerId) {
+        const confirmed = await UI.confirm(
+            "Are you sure you want to disconnect this listener?",
+            {
+                title: "Kick Listener",
+                confirmText: "Kick",
+                danger: true,
+            },
+        );
 
-    if (confirmed) {
-      try {
-        await API.killClient(mount, listenerId);
-        UI.success("Listener disconnected");
-        await this.refresh();
-      } catch (err) {
-        UI.error("Failed to kick listener: " + err.message);
-      }
-    }
-  },
-
-  /**
-   * Kick all listeners (optionally filtered by mount)
-   */
-  async kickAll() {
-    const mount = this._mountFilter;
-    const message = mount
-      ? `Are you sure you want to disconnect ALL listeners from ${mount}?`
-      : "Are you sure you want to disconnect ALL listeners from ALL mounts?";
-
-    const confirmed = await UI.confirm(message, {
-      title: "Kick All Listeners",
-      confirmText: "Kick All",
-      danger: true,
-    });
-
-    if (confirmed) {
-      try {
-        const listeners = mount
-          ? this._listeners.filter((l) => l.mount === mount)
-          : this._listeners;
-
-        let kicked = 0;
-        for (const listener of listeners) {
-          try {
-            await API.killClient(listener.mount, listener.id);
-            kicked++;
-          } catch (err) {
-            console.error(`Failed to kick ${listener.id}:`, err);
-          }
+        if (confirmed) {
+            try {
+                await API.killClient(mount, listenerId);
+                UI.success("Listener disconnected");
+                await this.refresh();
+            } catch (err) {
+                UI.error("Failed to kick listener: " + err.message);
+            }
         }
+    },
 
-        UI.success(`Disconnected ${kicked} listener(s)`);
-        await this.refresh();
-      } catch (err) {
-        UI.error("Failed to kick listeners: " + err.message);
-      }
-    }
-  },
+    /**
+     * Kick all listeners (optionally filtered by mount)
+     */
+    async kickAll() {
+        const mount = this._mountFilter;
+        const message = mount
+            ? `Are you sure you want to disconnect ALL listeners from ${mount}?`
+            : "Are you sure you want to disconnect ALL listeners from ALL mounts?";
+
+        const confirmed = await UI.confirm(message, {
+            title: "Kick All Listeners",
+            confirmText: "Kick All",
+            danger: true,
+        });
+
+        if (confirmed) {
+            try {
+                const listeners = mount
+                    ? this._listeners.filter((l) => l.mount === mount)
+                    : this._listeners;
+
+                let kicked = 0;
+                for (const listener of listeners) {
+                    try {
+                        await API.killClient(listener.mount, listener.id);
+                        kicked++;
+                    } catch (err) {
+                        console.error(`Failed to kick ${listener.id}:`, err);
+                    }
+                }
+
+                UI.success(`Disconnected ${kicked} listener(s)`);
+                await this.refresh();
+            } catch (err) {
+                UI.error("Failed to kick listeners: " + err.message);
+            }
+        }
+    },
 };
 
 // Export for use in app

@@ -12,6 +12,14 @@ import (
 	"github.com/google/uuid"
 )
 
+// STREAMING HOT PATH DESIGN:
+// The following functions are called thousands of times per second and MUST be lock-free:
+// - WriteData() - source pushing audio data
+// - IsActive() - listener checking if source is connected
+// - Buffer.ReadFromInto() - listener reading audio data
+//
+// We achieve this by using atomic operations instead of mutexes for the hot path.
+
 var (
 	ErrMountNotFound      = errors.New("mount point not found")
 	ErrMountAlreadyExists = errors.New("mount point already exists")
@@ -124,22 +132,26 @@ func (l *Listener) Done() <-chan struct{} {
 
 // Mount represents a stream mount point
 type Mount struct {
-	Path                string
-	Config              *config.MountConfig
-	buffer              *Buffer
+	Path   string
+	Config *config.MountConfig
+	buffer *Buffer
+
+	// HOT PATH: sourceActive is atomic for lock-free streaming
+	// This is checked on EVERY audio chunk write and read - must be fast
+	sourceActive atomic.Bool
+
 	metadata            *Metadata
 	listeners           map[string]*Listener
 	listenerCount       int32
-	sourceActive        bool
 	sourceIP            string
 	sourceID            string
 	startTime           time.Time
 	bytesReceived       int64
-	peakListeners       int32 // Deprecated: raw connection peak
-	peakUniqueListeners int32 // Peak unique listeners (by IP+UserAgent)
-	mu                  sync.RWMutex
-	listenerMu          sync.RWMutex
-	configMu            sync.RWMutex
+	peakListeners       int32        // Deprecated: raw connection peak
+	peakUniqueListeners int32        // Peak unique listeners (by IP+UserAgent)
+	mu                  sync.RWMutex // Protects sourceIP, sourceID, startTime (NOT sourceActive)
+	listenerMu          sync.RWMutex // Protects listeners map
+	configMu            sync.RWMutex // Protects Config
 	fallbackMount       string
 }
 
@@ -180,49 +192,49 @@ func (m *Mount) GetConfig() *config.MountConfig {
 
 // StartSource starts a source connection
 func (m *Mount) StartSource(sourceIP string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.sourceActive {
+	// Try to atomically set sourceActive from false to true
+	if !m.sourceActive.CompareAndSwap(false, true) {
 		return ErrSourceConnected
 	}
 
-	m.sourceActive = true
+	// Source is now active, set up the rest under lock
+	m.mu.Lock()
 	m.sourceIP = sourceIP
 	m.sourceID = uuid.New().String()
 	m.startTime = time.Now()
-	m.bytesReceived = 0
-	m.buffer.Reset()
+	atomic.StoreInt64(&m.bytesReceived, 0)
+	m.mu.Unlock()
 
+	m.buffer.Reset()
 	return nil
 }
 
 // StopSource stops the source connection
 func (m *Mount) StopSource() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// Atomically mark as inactive first (lock-free for hot path)
+	m.sourceActive.Store(false)
 
-	m.sourceActive = false
+	// Clear metadata under lock
+	m.mu.Lock()
 	m.sourceIP = ""
 	m.sourceID = ""
+	m.mu.Unlock()
 }
 
 // IsActive returns true if a source is connected
+// HOT PATH: Lock-free atomic read - called on every streaming iteration
 func (m *Mount) IsActive() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.sourceActive
+	return m.sourceActive.Load()
 }
 
 // WriteData writes data from the source to the buffer
-// Optimized: buffer handles its own notification now
+// HOT PATH: Completely lock-free - called ~40 times/second at 320kbps
+// This is the most critical function for streaming performance
 func (m *Mount) WriteData(data []byte) (int, error) {
-	m.mu.RLock()
-	if !m.sourceActive {
-		m.mu.RUnlock()
+	// Lock-free check using atomic
+	if !m.sourceActive.Load() {
 		return 0, ErrNoSource
 	}
-	m.mu.RUnlock()
 
 	n, err := m.buffer.Write(data)
 	if err != nil {
@@ -328,12 +340,19 @@ func (m *Mount) GetListeners() []*Listener {
 }
 
 // TotalBytesSent returns the total bytes sent to all current listeners
+// OPTIMIZED: Uses atomic loads without holding lock for long
 func (m *Mount) TotalBytesSent() int64 {
 	m.listenerMu.RLock()
-	defer m.listenerMu.RUnlock()
-
-	var total int64
+	// Get slice of pointers quickly, then release lock
+	listeners := make([]*Listener, 0, len(m.listeners))
 	for _, l := range m.listeners {
+		listeners = append(listeners, l)
+	}
+	m.listenerMu.RUnlock()
+
+	// Now sum bytes without holding any lock
+	var total int64
+	for _, l := range listeners {
 		total += atomic.LoadInt64(&l.BytesSent)
 	}
 	return total
@@ -354,37 +373,60 @@ type UniqueListener struct {
 // GetUniqueListeners returns listeners consolidated by IP+UserAgent
 // This is useful for display purposes since browsers (especially Safari)
 // often create multiple connections for a single user
+// GetUniqueListeners returns consolidated view of listeners by IP+UserAgent
+// OPTIMIZED: Minimizes lock hold time - copies data first, then processes
 func (m *Mount) GetUniqueListeners() []*UniqueListener {
-	m.listenerMu.RLock()
-	defer m.listenerMu.RUnlock()
+	// Snapshot listener data quickly under lock
+	type listenerSnapshot struct {
+		id          string
+		ip          string
+		userAgent   string
+		connectedAt time.Time
+		bytesSent   int64
+		lastActive  time.Time
+		isBot       bool
+	}
 
-	// Key: IP + "|" + UserAgent
+	m.listenerMu.RLock()
+	snapshots := make([]listenerSnapshot, 0, len(m.listeners))
+	for _, l := range m.listeners {
+		snapshots = append(snapshots, listenerSnapshot{
+			id:          l.ID,
+			ip:          l.IP,
+			userAgent:   l.UserAgent,
+			connectedAt: l.ConnectedAt,
+			bytesSent:   atomic.LoadInt64(&l.BytesSent),
+			lastActive:  l.LastActive,
+			isBot:       l.IsBot,
+		})
+	}
+	m.listenerMu.RUnlock()
+
+	// Now do expensive consolidation without holding any lock
 	unique := make(map[string]*UniqueListener)
 
-	for _, l := range m.listeners {
-		key := l.IP + "|" + l.UserAgent
+	for _, l := range snapshots {
+		key := l.ip + "|" + l.userAgent
 		if ul, exists := unique[key]; exists {
-			// Consolidate with existing
 			ul.Connections++
-			ul.BytesSent += atomic.LoadInt64(&l.BytesSent)
-			ul.IDs = append(ul.IDs, l.ID)
-			if l.ConnectedAt.Before(ul.ConnectedAt) {
-				ul.ConnectedAt = l.ConnectedAt
+			ul.BytesSent += l.bytesSent
+			ul.IDs = append(ul.IDs, l.id)
+			if l.connectedAt.Before(ul.ConnectedAt) {
+				ul.ConnectedAt = l.connectedAt
 			}
-			if l.LastActive.After(ul.LastActive) {
-				ul.LastActive = l.LastActive
+			if l.lastActive.After(ul.LastActive) {
+				ul.LastActive = l.lastActive
 			}
 		} else {
-			// New unique listener
 			unique[key] = &UniqueListener{
-				IP:          l.IP,
-				UserAgent:   l.UserAgent,
+				IP:          l.ip,
+				UserAgent:   l.userAgent,
 				Connections: 1,
-				ConnectedAt: l.ConnectedAt,
-				BytesSent:   atomic.LoadInt64(&l.BytesSent),
-				LastActive:  l.LastActive,
-				IDs:         []string{l.ID},
-				IsBot:       l.IsBot,
+				ConnectedAt: l.connectedAt,
+				BytesSent:   l.bytesSent,
+				LastActive:  l.lastActive,
+				IDs:         []string{l.id},
+				IsBot:       l.isBot,
 			}
 		}
 	}
@@ -397,17 +439,28 @@ func (m *Mount) GetUniqueListeners() []*UniqueListener {
 }
 
 // UniqueListenerCount returns the count of unique IP+UserAgent combinations (excluding bots)
+// OPTIMIZED: Minimizes lock hold time by copying data first
 func (m *Mount) UniqueListenerCount() int {
 	m.listenerMu.RLock()
-	defer m.listenerMu.RUnlock()
-
-	unique := make(map[string]struct{})
+	// Quick copy of essential data, then release lock
+	type listenerKey struct {
+		ip        string
+		userAgent string
+		isBot     bool
+	}
+	keys := make([]listenerKey, 0, len(m.listeners))
 	for _, l := range m.listeners {
-		// Skip bots in listener count
-		if l.IsBot {
+		keys = append(keys, listenerKey{l.IP, l.UserAgent, l.IsBot})
+	}
+	m.listenerMu.RUnlock()
+
+	// Now do expensive deduplication without holding lock
+	unique := make(map[string]struct{})
+	for _, k := range keys {
+		if k.isBot {
 			continue
 		}
-		key := l.IP + "|" + l.UserAgent
+		key := k.ip + "|" + k.userAgent
 		unique[key] = struct{}{}
 	}
 	return len(unique)
@@ -484,23 +537,37 @@ func (m *Mount) Notify() <-chan struct{} {
 }
 
 // Stats returns mount statistics
+// OPTIMIZED: Avoids nested locks by collecting data separately
+// This prevents lock contention that was causing streaming lag
 func (m *Mount) Stats() MountStats {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	// First, get listener stats WITHOUT holding mu lock
+	// This is the expensive operation that was blocking streaming
+	bytesSent := m.TotalBytesSent()
+	uniqueCount := m.UniqueListenerCount()
+	totalConns := m.ListenerCount()
+	peakListeners := m.PeakListeners()
 
-	return MountStats{
+	// Get sourceActive atomically (lock-free)
+	isActive := m.sourceActive.Load()
+
+	// Now get mount-level data with brief lock
+	m.mu.RLock()
+	stats := MountStats{
 		Path:             m.Path,
-		Active:           m.sourceActive,
+		Active:           isActive,
 		SourceIP:         m.sourceIP,
 		StartTime:        m.startTime,
 		BytesReceived:    atomic.LoadInt64(&m.bytesReceived),
-		BytesSent:        m.TotalBytesSent(),
-		Listeners:        m.UniqueListenerCount(), // Use unique count for display
-		TotalConnections: m.ListenerCount(),       // Raw connection count
-		PeakListeners:    m.PeakListeners(),
+		BytesSent:        bytesSent,
+		Listeners:        uniqueCount,
+		TotalConnections: totalConns,
+		PeakListeners:    peakListeners,
 		ContentType:      m.metadata.ContentType,
 		Metadata:         m.metadata.Clone(),
 	}
+	m.mu.RUnlock()
+
+	return stats
 }
 
 // MountStats contains mount point statistics
@@ -674,36 +741,56 @@ func (mm *MountManager) GetActiveMounts() []*Mount {
 }
 
 // Stats returns statistics for all mounts
+// OPTIMIZED: Minimizes lock hold time to prevent blocking streaming
+// Previously held mm.mu.RLock while calling mount.Stats() for every mount,
+// which caused cascading lock contention and streaming lag
 func (mm *MountManager) Stats() []MountStats {
+	// Quickly copy mount pointers under lock
 	mm.mu.RLock()
-	defer mm.mu.RUnlock()
-
-	stats := make([]MountStats, 0, len(mm.mounts))
+	mounts := make([]*Mount, 0, len(mm.mounts))
 	for _, mount := range mm.mounts {
+		mounts = append(mounts, mount)
+	}
+	mm.mu.RUnlock()
+
+	// Now collect stats WITHOUT holding MountManager lock
+	// This allows streaming writes to proceed unblocked
+	stats := make([]MountStats, 0, len(mounts))
+	for _, mount := range mounts {
 		stats = append(stats, mount.Stats())
 	}
 	return stats
 }
 
 // TotalListeners returns the total number of listeners across all mounts
+// OPTIMIZED: Copies mount pointers first to minimize lock time
 func (mm *MountManager) TotalListeners() int {
 	mm.mu.RLock()
-	defer mm.mu.RUnlock()
+	mounts := make([]*Mount, 0, len(mm.mounts))
+	for _, mount := range mm.mounts {
+		mounts = append(mounts, mount)
+	}
+	mm.mu.RUnlock()
 
 	total := 0
-	for _, mount := range mm.mounts {
+	for _, mount := range mounts {
 		total += mount.ListenerCount()
 	}
 	return total
 }
 
 // TotalBytesSent returns the total bytes sent across all mounts
+// OPTIMIZED: Copies mount pointers first to minimize lock time
 func (mm *MountManager) TotalBytesSent() int64 {
 	mm.mu.RLock()
-	defer mm.mu.RUnlock()
+	mounts := make([]*Mount, 0, len(mm.mounts))
+	for _, mount := range mm.mounts {
+		mounts = append(mounts, mount)
+	}
+	mm.mu.RUnlock()
 
 	var total int64
-	for _, mount := range mm.mounts {
+	for _, mount := range mounts {
 		total += mount.TotalBytesSent()
 	}
 	return total

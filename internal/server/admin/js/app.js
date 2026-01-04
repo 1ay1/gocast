@@ -1,362 +1,400 @@
 /**
  * GoCast Admin - Main Application Controller
  * Manages navigation, initialization, and app lifecycle
+ *
+ * ANTI-FLICKER DESIGN:
+ * 1. SSE takes priority over polling - never run both simultaneously
+ * 2. Throttled reconnection attempts
+ * 3. Graceful degradation to polling only when SSE fails
  */
 
 const App = {
-  // Current page
-  currentPage: "dashboard",
+    // Current page
+    currentPage: "dashboard",
 
-  // Page params (for passing data between pages)
-  _pageParams: null,
+    // Page params (for passing data between pages)
+    _pageParams: null,
 
-  // Page modules
-  pages: {
-    dashboard: DashboardPage,
-    streams: StreamsPage,
-    mounts: MountsPage,
-    listeners: ListenersPage,
-    settings: SettingsPage,
-    logs: LogsPage,
-  },
+    // SSE connection state
+    _sseConnected: false,
+    _sseReconnectTimeout: null,
 
-  // Page titles
-  pageTitles: {
-    dashboard: "Dashboard",
-    streams: "Streams",
-    mounts: "Mount Points",
-    listeners: "Listeners",
-    settings: "Settings",
-    logs: "Logs",
-  },
+    // Page modules
+    pages: {
+        dashboard: DashboardPage,
+        streams: StreamsPage,
+        mounts: MountsPage,
+        listeners: ListenersPage,
+        settings: SettingsPage,
+        logs: LogsPage,
+    },
 
-  /**
-   * Initialize the application
-   */
-  async init() {
-    console.log("GoCast Admin initializing...");
+    // Page titles
+    pageTitles: {
+        dashboard: "Dashboard",
+        streams: "Streams",
+        mounts: "Mount Points",
+        listeners: "Listeners",
+        settings: "Settings",
+        logs: "Logs",
+    },
 
-    // Setup navigation
-    this.setupNavigation();
+    /**
+     * Initialize the application
+     */
+    async init() {
+        console.log("GoCast Admin initializing...");
 
-    // Setup keyboard shortcuts
-    this.setupKeyboardShortcuts();
+        // Setup navigation
+        this.setupNavigation();
 
-    // Setup refresh button
-    const refreshBtn = UI.$("refreshBtn");
-    if (refreshBtn) {
-      refreshBtn.onclick = () => this.refreshCurrentPage();
-    }
+        // Setup keyboard shortcuts
+        this.setupKeyboardShortcuts();
 
-    // Connect to server
-    await this.connect();
+        // Setup refresh button
+        const refreshBtn = UI.$("refreshBtn");
+        if (refreshBtn) {
+            refreshBtn.onclick = () => this.refreshCurrentPage();
+        }
 
-    // Navigate to initial page (from URL hash or default)
-    const initialPage = window.location.hash.slice(1) || "dashboard";
-    this.navigateTo(initialPage);
+        // Connect to server
+        await this.connect();
 
-    // Start uptime ticker
-    this.startUptimeTicker();
+        // Navigate to initial page (from URL hash or default)
+        const initialPage = window.location.hash.slice(1) || "dashboard";
+        this.navigateTo(initialPage);
 
-    console.log("GoCast Admin initialized");
-  },
+        // Start uptime ticker
+        this.startUptimeTicker();
 
-  /**
-   * Connect to the server
-   */
-  async connect() {
-    const statusDot = document.querySelector(".status-dot");
-    const statusText = document.querySelector(".status-text");
-    const connIndicator = UI.$("connectionIndicator");
+        console.log("GoCast Admin initialized");
+    },
 
-    try {
-      // Try to get initial status
-      const status = await API.getStatus();
+    /**
+     * Connect to the server
+     */
+    async connect() {
+        const statusDot = document.querySelector(".status-dot");
+        const statusText = document.querySelector(".status-text");
+        const connIndicator = UI.$("connectionIndicator");
 
-      // Update UI to show connected
-      if (statusDot) {
-        statusDot.classList.remove("offline");
-        statusDot.classList.add("online");
-      }
-      if (statusText) {
-        statusText.textContent = "Connected";
-      }
-      if (connIndicator) {
-        connIndicator.classList.remove("disconnected");
-        connIndicator.querySelector(".label").textContent = "Live";
-      }
+        try {
+            // Try to get initial status
+            const status = await API.getStatus();
 
-      // Update state
-      State.set("server.connected", true);
-      State.updateFromStatus(status);
+            // Update UI to show connected
+            if (statusDot) {
+                statusDot.classList.remove("offline");
+                statusDot.classList.add("online");
+            }
+            if (statusText) {
+                statusText.textContent = "Connected";
+            }
+            if (connIndicator) {
+                connIndicator.classList.remove("disconnected");
+                connIndicator.querySelector(".label").textContent = "Live";
+            }
 
-      // Load initial config
-      try {
-        const config = await API.getConfig();
-        State.updateFromConfig(config);
-      } catch (err) {
-        console.error("Failed to load config:", err);
-      }
+            // Update state
+            State.set("server.connected", true);
+            State.updateFromStatus(status);
 
-      // Try to connect SSE for real-time updates
-      try {
-        await API.connectSSE();
+            // Load initial config
+            try {
+                const config = await API.getConfig();
+                State.updateFromConfig(config);
+            } catch (err) {
+                console.error("Failed to load config:", err);
+            }
 
-        // Subscribe to SSE stats events to keep state updated
-        API.on("stats", (data) => {
-          State.updateFromStatus(data);
+            // Try to connect SSE for real-time updates
+            try {
+                await API.connectSSE();
+                this._sseConnected = true;
+
+                // Stop any existing polling - SSE is now active
+                API.stopPolling();
+
+                // Subscribe to SSE stats events to keep state updated
+                API.on("stats", (data) => {
+                    State.updateFromStatus(data);
+                });
+
+                // Handle SSE disconnection
+                API.on("disconnected", () => {
+                    this._sseConnected = false;
+                    // Start polling as fallback, but don't spam reconnects
+                    if (!this._sseReconnectTimeout) {
+                        API.startPolling(3000);
+                    }
+                });
+
+                // Handle SSE reconnection
+                API.on("connected", () => {
+                    this._sseConnected = true;
+                    API.stopPolling(); // SSE is back, stop polling
+                });
+            } catch (err) {
+                console.warn(
+                    "SSE not available, falling back to polling:",
+                    err,
+                );
+                this._sseConnected = false;
+                API.startPolling(3000);
+            }
+        } catch (err) {
+            console.error("Failed to connect:", err);
+
+            // Update UI to show disconnected
+            if (statusDot) {
+                statusDot.classList.remove("online");
+                statusDot.classList.add("offline");
+            }
+            if (statusText) {
+                statusText.textContent = "Disconnected";
+            }
+            if (connIndicator) {
+                connIndicator.classList.add("disconnected");
+                connIndicator.querySelector(".label").textContent = "Offline";
+            }
+
+            State.set("server.connected", false);
+
+            // Retry connection after delay
+            setTimeout(() => this.connect(), 5000);
+        }
+    },
+
+    /**
+     * Setup navigation handlers
+     */
+    setupNavigation() {
+        // Handle nav item clicks
+        document.querySelectorAll(".nav-item").forEach((item) => {
+            item.addEventListener("click", (e) => {
+                e.preventDefault();
+                const page = item.dataset.page;
+                if (page) {
+                    this.navigateTo(page);
+                }
+            });
         });
-      } catch (err) {
-        console.warn("SSE not available, falling back to polling:", err);
-        API.startPolling(3000);
-      }
-    } catch (err) {
-      console.error("Failed to connect:", err);
 
-      // Update UI to show disconnected
-      if (statusDot) {
-        statusDot.classList.remove("online");
-        statusDot.classList.add("offline");
-      }
-      if (statusText) {
-        statusText.textContent = "Disconnected";
-      }
-      if (connIndicator) {
-        connIndicator.classList.add("disconnected");
-        connIndicator.querySelector(".label").textContent = "Offline";
-      }
+        // Handle browser back/forward
+        window.addEventListener("hashchange", () => {
+            const page = window.location.hash.slice(1) || "dashboard";
+            if (page !== this.currentPage) {
+                this.navigateTo(page, null, false);
+            }
+        });
+    },
 
-      State.set("server.connected", false);
+    /**
+     * Setup keyboard shortcuts
+     */
+    setupKeyboardShortcuts() {
+        document.addEventListener("keydown", (e) => {
+            // Escape to close modal
+            if (e.key === "Escape") {
+                UI.hideModal();
+            }
 
-      // Retry connection after delay
-      setTimeout(() => this.connect(), 5000);
-    }
-  },
+            // Ctrl/Cmd + R to refresh (prevent default and do our refresh)
+            if ((e.ctrlKey || e.metaKey) && e.key === "r") {
+                e.preventDefault();
+                this.refreshCurrentPage();
+            }
 
-  /**
-   * Setup navigation handlers
-   */
-  setupNavigation() {
-    // Handle nav item clicks
-    document.querySelectorAll(".nav-item").forEach((item) => {
-      item.addEventListener("click", (e) => {
-        e.preventDefault();
-        const page = item.dataset.page;
-        if (page) {
-          this.navigateTo(page);
+            // Number keys to switch pages (1-6)
+            if (
+                e.key >= "1" &&
+                e.key <= "6" &&
+                !e.ctrlKey &&
+                !e.metaKey &&
+                !e.altKey
+            ) {
+                const target = e.target;
+                if (
+                    target.tagName !== "INPUT" &&
+                    target.tagName !== "TEXTAREA" &&
+                    target.tagName !== "SELECT"
+                ) {
+                    const pages = [
+                        "dashboard",
+                        "streams",
+                        "mounts",
+                        "listeners",
+                        "settings",
+                        "logs",
+                    ];
+                    const index = parseInt(e.key) - 1;
+                    if (pages[index]) {
+                        this.navigateTo(pages[index]);
+                    }
+                }
+            }
+        });
+    },
+
+    /**
+     * Navigate to a page
+     */
+    navigateTo(page, params = null, updateHash = true) {
+        // Validate page exists
+        if (!this.pages[page]) {
+            console.error("Unknown page:", page);
+            return;
         }
-      });
-    });
 
-    // Handle browser back/forward
-    window.addEventListener("hashchange", () => {
-      const page = window.location.hash.slice(1) || "dashboard";
-      if (page !== this.currentPage) {
-        this.navigateTo(page, null, false);
-      }
-    });
-  },
+        // Clear UI caches when navigating
+        UI.clearCache();
 
-  /**
-   * Setup keyboard shortcuts
-   */
-  setupKeyboardShortcuts() {
-    document.addEventListener("keydown", (e) => {
-      // Escape to close modal
-      if (e.key === "Escape") {
-        UI.hideModal();
-      }
-
-      // Ctrl/Cmd + R to refresh (prevent default and do our refresh)
-      if ((e.ctrlKey || e.metaKey) && e.key === "r") {
-        e.preventDefault();
-        this.refreshCurrentPage();
-      }
-
-      // Number keys to switch pages (1-6)
-      if (
-        e.key >= "1" &&
-        e.key <= "6" &&
-        !e.ctrlKey &&
-        !e.metaKey &&
-        !e.altKey
-      ) {
-        const target = e.target;
+        // Destroy current page
+        const currentPageModule = this.pages[this.currentPage];
         if (
-          target.tagName !== "INPUT" &&
-          target.tagName !== "TEXTAREA" &&
-          target.tagName !== "SELECT"
+            currentPageModule &&
+            typeof currentPageModule.destroy === "function"
         ) {
-          const pages = [
-            "dashboard",
-            "streams",
-            "mounts",
-            "listeners",
-            "settings",
-            "logs",
-          ];
-          const index = parseInt(e.key) - 1;
-          if (pages[index]) {
-            this.navigateTo(pages[index]);
-          }
+            currentPageModule.destroy();
         }
-      }
-    });
-  },
 
-  /**
-   * Navigate to a page
-   */
-  navigateTo(page, params = null, updateHash = true) {
-    // Validate page exists
-    if (!this.pages[page]) {
-      console.error("Unknown page:", page);
-      return;
-    }
+        // Store params
+        this._pageParams = params;
 
-    // Destroy current page
-    const currentPageModule = this.pages[this.currentPage];
-    if (currentPageModule && typeof currentPageModule.destroy === "function") {
-      currentPageModule.destroy();
-    }
+        // Update current page
+        this.currentPage = page;
+        State.set("currentPage", page);
 
-    // Store params
-    this._pageParams = params;
+        // Update URL hash
+        if (updateHash) {
+            window.location.hash = page;
+        }
 
-    // Update current page
-    this.currentPage = page;
-    State.set("currentPage", page);
+        // Update nav active state
+        document.querySelectorAll(".nav-item").forEach((item) => {
+            item.classList.toggle("active", item.dataset.page === page);
+        });
 
-    // Update URL hash
-    if (updateHash) {
-      window.location.hash = page;
-    }
+        // Update page title
+        const titleEl = UI.$("pageTitle");
+        if (titleEl) {
+            titleEl.textContent = this.pageTitles[page] || page;
+        }
 
-    // Update nav active state
-    document.querySelectorAll(".nav-item").forEach((item) => {
-      item.classList.toggle("active", item.dataset.page === page);
-    });
+        // Render new page
+        const content = UI.$("content");
+        const pageModule = this.pages[page];
 
-    // Update page title
-    const titleEl = UI.$("pageTitle");
-    if (titleEl) {
-      titleEl.textContent = this.pageTitles[page] || page;
-    }
-
-    // Render new page
-    const content = UI.$("content");
-    const pageModule = this.pages[page];
-
-    if (content && pageModule) {
-      // Show loading state briefly
-      content.innerHTML = `
+        if (content && pageModule) {
+            // Show loading state briefly
+            content.innerHTML = `
         <div class="loading">
           <div class="spinner"></div>
           <p>Loading...</p>
         </div>
       `;
 
-      // Render page content
-      setTimeout(() => {
-        content.innerHTML = pageModule.render();
+            // Render page content
+            setTimeout(() => {
+                content.innerHTML = pageModule.render();
 
-        // Initialize page
-        if (typeof pageModule.init === "function") {
-          pageModule.init();
+                // Initialize page
+                if (typeof pageModule.init === "function") {
+                    pageModule.init();
+                }
+            }, 50);
         }
-      }, 50);
-    }
-  },
+    },
 
-  /**
-   * Get current page params
-   */
-  getPageParams() {
-    return this._pageParams;
-  },
+    /**
+     * Get current page params
+     */
+    getPageParams() {
+        return this._pageParams;
+    },
 
-  /**
-   * Refresh current page
-   */
-  async refreshCurrentPage() {
-    const pageModule = this.pages[this.currentPage];
+    /**
+     * Refresh current page
+     */
+    async refreshCurrentPage() {
+        const pageModule = this.pages[this.currentPage];
 
-    if (pageModule) {
-      // Show brief loading indicator on refresh button
-      const refreshBtn = UI.$("refreshBtn");
-      if (refreshBtn) {
-        refreshBtn.disabled = true;
-        refreshBtn.querySelector("span").textContent = "⏳";
-      }
+        if (pageModule) {
+            // Show brief loading indicator on refresh button
+            const refreshBtn = UI.$("refreshBtn");
+            if (refreshBtn) {
+                refreshBtn.disabled = true;
+                refreshBtn.querySelector("span").textContent = "⏳";
+            }
 
-      try {
-        // Call page refresh if available
-        if (typeof pageModule.refresh === "function") {
-          await pageModule.refresh();
-        } else if (typeof pageModule.init === "function") {
-          // Fall back to re-init
-          await pageModule.init();
+            try {
+                // Call page refresh if available
+                if (typeof pageModule.refresh === "function") {
+                    await pageModule.refresh();
+                } else if (typeof pageModule.init === "function") {
+                    // Fall back to re-init
+                    await pageModule.init();
+                }
+
+                UI.success("Refreshed");
+            } catch (err) {
+                UI.error("Refresh failed: " + err.message);
+            } finally {
+                // Restore button
+                if (refreshBtn) {
+                    refreshBtn.disabled = false;
+                    refreshBtn.querySelector("span").textContent = "🔄";
+                }
+            }
         }
+    },
 
-        UI.success("Refreshed");
-      } catch (err) {
-        UI.error("Refresh failed: " + err.message);
-      } finally {
-        // Restore button
-        if (refreshBtn) {
-          refreshBtn.disabled = false;
-          refreshBtn.querySelector("span").textContent = "🔄";
-        }
-      }
-    }
-  },
+    /**
+     * Start uptime ticker
+     */
+    startUptimeTicker() {
+        const updateDisplay = () => {
+            const uptimeStr = State.getUptimeString();
 
-  /**
-   * Start uptime ticker
-   */
-  startUptimeTicker() {
-    const updateDisplay = () => {
-      const uptimeStr = State.getUptimeString();
+            // Update sidebar uptime
+            const uptimeEl = UI.$("uptime");
+            if (uptimeEl) {
+                uptimeEl.textContent = uptimeStr;
+            }
 
-      // Update sidebar uptime
-      const uptimeEl = UI.$("uptime");
-      if (uptimeEl) {
-        uptimeEl.textContent = uptimeStr;
-      }
+            // Update dashboard uptime
+            const serverUptimeEl = UI.$("serverUptime");
+            if (serverUptimeEl) {
+                serverUptimeEl.textContent = uptimeStr;
+            }
 
-      // Update dashboard uptime
-      const serverUptimeEl = UI.$("serverUptime");
-      if (serverUptimeEl) {
-        serverUptimeEl.textContent = uptimeStr;
-      }
+            // Update version in sidebar
+            const versionEl = UI.$("version");
+            if (versionEl) {
+                const version = State.get("server.version");
+                versionEl.textContent = version || "dev";
+            }
+        };
 
-      // Update version in sidebar
-      const versionEl = UI.$("version");
-      if (versionEl) {
-        const version = State.get("server.version");
-        versionEl.textContent = version || "dev";
-      }
-    };
+        // Update immediately and then every second
+        updateDisplay();
+        setInterval(updateDisplay, 1000);
 
-    // Update immediately and then every second
-    updateDisplay();
-    setInterval(updateDisplay, 1000);
-
-    // Also subscribe to version changes for immediate updates
-    State.subscribe("server.version", (version) => {
-      const versionEl = UI.$("version");
-      if (versionEl) {
-        versionEl.textContent = version || "dev";
-      }
-    });
-  },
+        // Also subscribe to version changes for immediate updates
+        State.subscribe("server.version", (version) => {
+            const versionEl = UI.$("version");
+            if (versionEl) {
+                versionEl.textContent = version || "dev";
+            }
+        });
+    },
 };
 
 // Initialize app when DOM is ready
 document.addEventListener("DOMContentLoaded", () => {
-  App.init().catch((err) => {
-    console.error("App initialization failed:", err);
-  });
+    App.init().catch((err) => {
+        console.error("App initialization failed:", err);
+    });
 });
 
 // Export for global access
