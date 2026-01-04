@@ -56,6 +56,13 @@ type Server struct {
 	// Flag to track if HTTPS is running
 	httpsRunning   bool
 	httpsRunningMu sync.RWMutex
+
+	// ADMIN/STREAMING ISOLATION: Stats cache updated in background goroutine
+	// Admin panel reads from cache, NEVER touches streaming path directly
+	statsCache     []stream.MountStats
+	statsCacheMu   sync.RWMutex
+	statsCacheTime time.Time
+	statsCacheStop chan struct{}
 }
 
 // generateToken creates a secure random token
@@ -90,7 +97,11 @@ func New(cfg *config.Config, logger *log.Logger) *Server {
 		sessionTokens:   make(map[string]time.Time),
 		logBuffer:       logBuffer,
 		activityBuffer:  activityBuffer,
+		statsCacheStop:  make(chan struct{}),
 	}
+
+	// Start background stats cache updater - isolates admin panel from streaming
+	go s.runStatsCacheUpdater()
 
 	// Log server start
 	activityBuffer.Add(ActivityServerStart, "GoCast server started", map[string]interface{}{
@@ -130,7 +141,11 @@ func NewWithConfigManager(cm *config.ConfigManager, logger *log.Logger) *Server 
 		sessionTokens:   make(map[string]time.Time),
 		logBuffer:       logBuffer,
 		activityBuffer:  activityBuffer,
+		statsCacheStop:  make(chan struct{}),
 	}
+
+	// Start background stats cache updater - isolates admin panel from streaming
+	go s.runStatsCacheUpdater()
 
 	// Log server start
 	activityBuffer.Add(ActivityServerStart, "GoCast server started", map[string]interface{}{
@@ -270,6 +285,51 @@ func (s *Server) validateSessionToken(token string) bool {
 }
 
 // Start starts the HTTP server(s)
+// runStatsCacheUpdater runs in background, updating stats cache every 2 seconds
+// This completely isolates admin panel from streaming - admin reads cached data only
+func (s *Server) runStatsCacheUpdater() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	// Initial update
+	s.updateStatsCache()
+
+	for {
+		select {
+		case <-s.statsCacheStop:
+			return
+		case <-ticker.C:
+			s.updateStatsCache()
+		}
+	}
+}
+
+// updateStatsCache collects stats in background - never called from streaming path
+func (s *Server) updateStatsCache() {
+	// Collect stats - this may take a few ms but doesn't block streaming
+	stats := s.mountManager.Stats()
+
+	// Update cache atomically
+	s.statsCacheMu.Lock()
+	s.statsCache = stats
+	s.statsCacheTime = time.Now()
+	s.statsCacheMu.Unlock()
+}
+
+// getCachedStats returns cached stats - INSTANT, never blocks streaming
+func (s *Server) getCachedStats() []stream.MountStats {
+	s.statsCacheMu.RLock()
+	defer s.statsCacheMu.RUnlock()
+
+	// Return copy to prevent race conditions
+	if s.statsCache == nil {
+		return nil
+	}
+	result := make([]stream.MountStats, len(s.statsCache))
+	copy(result, s.statsCache)
+	return result
+}
+
 func (s *Server) Start() error {
 	// Create main router
 	mux := s.createRouter()
@@ -562,6 +622,14 @@ func (s *Server) startHTTPS(handler http.Handler) error {
 
 // Stop gracefully stops the server
 func (s *Server) Stop(ctx context.Context) error {
+	// Stop stats cache updater first
+	select {
+	case <-s.statsCacheStop:
+		// Already closed
+	default:
+		close(s.statsCacheStop)
+	}
+
 	s.logger.Println("Shutting down GoCast server...")
 
 	// Stop activity buffer flush loop first
@@ -1212,7 +1280,11 @@ func (s *Server) handleAdminToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sendSSEStats(w http.ResponseWriter, flusher http.Flusher) {
-	stats := s.mountManager.Stats()
+	// Use CACHED stats - never touch streaming path directly
+	stats := s.getCachedStats()
+	if stats == nil {
+		return // Cache not ready yet
+	}
 
 	// Build mounts array for the stats event
 	var sb strings.Builder
