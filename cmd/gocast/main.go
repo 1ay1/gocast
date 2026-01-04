@@ -22,6 +22,11 @@ var (
 	buildDate = "unknown"
 )
 
+func init() {
+	// Set the server package version from our version variable
+	server.Version = version
+}
+
 func main() {
 	// Parse command line flags
 	dataDir := flag.String("data", "", "Data directory for config and state (default: ~/.gocast)")

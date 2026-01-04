@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -214,8 +215,8 @@ func (h *ListenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Stream audio to client
-	h.streamToClient(w, flusher, hasFlusher, listener, mount, metadataInterval)
+	// Stream audio to client - pass request context for disconnect detection
+	h.streamToClient(r.Context(), w, flusher, hasFlusher, listener, mount, metadataInterval)
 }
 
 // HandleHead handles HEAD requests - returns headers without creating a listener
@@ -286,7 +287,7 @@ func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount,
 }
 
 // streamToClient implements audio streaming to a listener
-func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metaInterval int) {
+func (h *ListenerHandler) streamToClient(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metaInterval int) {
 	buffer := mount.Buffer()
 	if buffer == nil {
 		return
@@ -352,7 +353,10 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	var lastMeta string
 
 	for burstSent < burstAvailable {
+		// Check for client disconnect using both context and listener done channel
 		select {
+		case <-ctx.Done():
+			return
 		case <-listener.Done():
 			return
 		default:
@@ -402,7 +406,8 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	// StreamWriter already flushes after each write, no need for extra flush
 
 	// ==========================================================================
-	// PHASE 2: REAL-TIME STREAMING - Use efficient waiting instead of polling
+	// PHASE 2: REAL-TIME STREAMING - Pure non-blocking read/write loop
+	// NO WAITING - just read what's available and write immediately
 	// ==========================================================================
 
 	var sourceDisconnectTime time.Time
@@ -415,8 +420,12 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 	for {
 		iterationCount++
 
-		// Check for client disconnect
+		// Check for client disconnect - use BOTH request context AND listener done channel
 		select {
+		case <-ctx.Done():
+			h.logger.Printf("INFO: Listener %s disconnected (context cancelled) after %v (sent: %d bytes, skipped: %d bytes, iterations: %d)",
+				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, iterationCount)
+			return
 		case <-listener.Done():
 			h.logger.Printf("INFO: Listener %s disconnected (client closed) after %v (sent: %d bytes, skipped: %d bytes, iterations: %d)",
 				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, iterationCount)
@@ -495,15 +504,9 @@ func (h *ListenerHandler) streamToClient(w http.ResponseWriter, flusher http.Flu
 		}
 
 		if n == 0 {
-			// No data available - use efficient waiting with context
-			// This wakes up INSTANTLY when new data arrives via sync.Cond.Broadcast()
-			// Much better than polling with time.Sleep!
-			if !buffer.WaitForDataContext(readPos, listener.Done()) {
-				// Client disconnected while waiting
-				h.logger.Printf("INFO: Listener %s disconnected (cancelled while waiting) after %v (sent: %d bytes, skipped: %d bytes, skip-to-live: %d, iterations: %d)",
-					listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, skipToLiveCount, iterationCount)
-				return
-			}
+			// No data available - tiny sleep to prevent CPU spin, then continue
+			// 1ms is fast enough for audio (320kbps = 40 bytes/ms)
+			time.Sleep(time.Millisecond)
 			continue
 		}
 
@@ -890,7 +893,21 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 
 	totalBytesSent := h.mountManager.TotalBytesSent()
 
-	sb.WriteString(`{"server":{"id":"`)
+	// Format start time as RFC3339 for frontend parsing
+	startedStr := h.startTime.Format(time.RFC3339)
+
+	// Top-level fields for frontend compatibility
+	sb.WriteString(`{"server_id":"`)
+	sb.WriteString(escapeJSON(serverID))
+	sb.WriteString(`","version":"`)
+	sb.WriteString(escapeJSON(h.version))
+	sb.WriteString(`","started":"`)
+	sb.WriteString(startedStr)
+	sb.WriteString(`","uptime":`)
+	sb.WriteString(strconv.FormatInt(uptime, 10))
+	sb.WriteString(`,"total_bytes_sent":`)
+	sb.WriteString(strconv.FormatInt(totalBytesSent, 10))
+	sb.WriteString(`,"server":{"id":"`)
 	sb.WriteString(escapeJSON(serverID))
 	sb.WriteString(`","version":"`)
 	sb.WriteString(escapeJSON(h.version))
