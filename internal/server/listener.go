@@ -52,10 +52,6 @@ const (
 	// When lag exceeds this, we skip ahead to live edge instead of accumulating delay
 	// 512KB = ~13 seconds at 320kbps - noticeable but recoverable
 	softLagBytes = 524288
-
-	// lagCheckInterval: How often to check for lag recovery (in iterations)
-	// Check every 100 iterations (~1-2 seconds) to avoid overhead
-	lagCheckInterval = 100
 )
 
 // botUserAgents contains patterns for known bots/preview fetchers
@@ -101,7 +97,7 @@ type ListenerHandler struct {
 	activityBuffer *ActivityBuffer
 	mu             sync.RWMutex
 
-	// Buffer pool for streaming
+	// Buffer pool for streaming reads
 	bufPool sync.Pool
 }
 
@@ -287,6 +283,7 @@ func (h *ListenerHandler) setHeaders(w http.ResponseWriter, mount *stream.Mount,
 }
 
 // streamToClient implements audio streaming to a listener
+// BULLETPROOF: Uses event-driven sync.Cond instead of polling
 func (h *ListenerHandler) streamToClient(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, hasFlusher bool, listener *stream.Listener, mount *stream.Mount, metaInterval int) {
 	buffer := mount.Buffer()
 	if buffer == nil {
@@ -305,7 +302,7 @@ func (h *ListenerHandler) streamToClient(ctx context.Context, w http.ResponseWri
 
 	// Wait for source if not active
 	if !mount.IsActive() {
-		if !h.waitForSource(mount, listener) {
+		if !h.waitForSource(ctx, mount, listener) {
 			return
 		}
 	}
@@ -331,29 +328,34 @@ func (h *ListenerHandler) streamToClient(ctx context.Context, w http.ResponseWri
 	// PHASE 1: INITIAL BURST - Fill the player's buffer
 	// ==========================================================================
 
+	// Start at a sync point for clean audio
+	readPos := buffer.GetSyncPoint()
 	writePos := buffer.WritePos()
-	burstAvailable := int64(burstSize)
-	if burstAvailable > writePos {
-		burstAvailable = writePos
+
+	// Adjust if sync point is too far back
+	if writePos-readPos > int64(burstSize) {
+		readPos = writePos - int64(burstSize)
+		// Find MP3 sync at the adjusted position
+		readPos = buffer.FindMP3SyncFrom(readPos)
 	}
 
-	readPos := writePos - burstAvailable
-	if readPos < 0 {
-		readPos = 0
-	}
-
-	// Send initial burst - use SafeReadFromInto to detect any skipped bytes
-	// IMPORTANT: Must handle ICY metadata in burst phase too, otherwise protocol gets out of sync!
+	// Send initial burst
 	burstSent := int64(0)
-	needsSync := true
 	totalSkipped := int64(0)
 
-	// Initialize metadata tracking for burst phase (same variables used in real-time phase)
+	// Initialize metadata tracking (used in both burst and real-time phases)
 	var metaByteCount int
 	var lastMeta string
 
-	for burstSent < burstAvailable {
-		// Check for client disconnect using both context and listener done channel
+	// Get pooled metadata buffer if needed
+	var metaBufPtr *[]byte
+	if metaInterval > 0 {
+		metaBufPtr = stream.GetMetaBuffer()
+		defer stream.PutMetaBuffer(metaBufPtr)
+	}
+
+	for burstSent < int64(burstSize) {
+		// Check for client disconnect
 		select {
 		case <-ctx.Done():
 			return
@@ -374,24 +376,10 @@ func (h *ListenerHandler) streamToClient(ctx context.Context, w http.ResponseWri
 		data := readBuf[:n]
 		readPos = newPos
 
-		// Find MP3 frame sync on first chunk
-		if needsSync && n >= 4 {
-			if syncOffset := findMP3Sync(data); syncOffset > 0 && syncOffset < n-4 {
-				data = data[syncOffset:]
-			}
-			needsSync = false
-		}
-
-		if len(data) == 0 {
-			continue
-		}
-
-		// CRITICAL FIX: Handle ICY metadata in burst phase too!
-		// Otherwise client expects metadata every 16KB but we send raw audio,
-		// causing complete protocol desync and audio garbage/skipping
+		// Write data (with or without ICY metadata)
 		var err error
 		if metaInterval > 0 {
-			err = writeDataWithMetaSW(sw, data, mount, &metaByteCount, &lastMeta, metaInterval)
+			err = writeDataWithMetaPooled(sw, data, mount, &metaByteCount, &lastMeta, metaInterval, metaBufPtr)
 		} else {
 			_, err = sw.Write(data)
 		}
@@ -403,32 +391,25 @@ func (h *ListenerHandler) streamToClient(ctx context.Context, w http.ResponseWri
 		atomic.AddInt64(&listener.BytesSent, int64(len(data)))
 	}
 
-	// StreamWriter already flushes after each write, no need for extra flush
-
 	// ==========================================================================
-	// PHASE 2: REAL-TIME STREAMING - Pure non-blocking read/write loop
-	// NO WAITING - just read what's available and write immediately
+	// PHASE 2: REAL-TIME STREAMING - Event-driven, NO POLLING!
+	// Uses sync.Cond for instant wakeup when new data arrives
 	// ==========================================================================
 
 	var sourceDisconnectTime time.Time
 	sourceWasActive := true
-	// metaByteCount and lastMeta are now initialized in burst phase above
-	// and continue to be used here for proper protocol continuity
-	iterationCount := 0
-	skipToLiveCount := 0 // Track how many times we've recovered via skip-to-live
+	skipToLiveCount := 0
 
 	for {
-		iterationCount++
-
-		// Check for client disconnect - use BOTH request context AND listener done channel
+		// Check for client disconnect first
 		select {
 		case <-ctx.Done():
-			h.logger.Printf("INFO: Listener %s disconnected (context cancelled) after %v (sent: %d bytes, skipped: %d bytes, iterations: %d)",
-				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, iterationCount)
+			h.logger.Printf("INFO: Listener %s disconnected (context cancelled) after %v (sent: %d bytes, skipped: %d bytes)",
+				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped)
 			return
 		case <-listener.Done():
-			h.logger.Printf("INFO: Listener %s disconnected (client closed) after %v (sent: %d bytes, skipped: %d bytes, iterations: %d)",
-				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, iterationCount)
+			h.logger.Printf("INFO: Listener %s disconnected (client closed) after %v (sent: %d bytes, skipped: %d bytes)",
+				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped)
 			return
 		default:
 		}
@@ -443,106 +424,107 @@ func (h *ListenerHandler) streamToClient(ctx context.Context, w http.ResponseWri
 		}
 
 		if !sourceActive && time.Since(sourceDisconnectTime) > sourceReconnectWait {
-			h.logger.Printf("INFO: Listener %s disconnected (source timeout) after %v (sent: %d bytes, skipped: %d bytes, iterations: %d)",
-				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, iterationCount)
+			h.logger.Printf("INFO: Listener %s disconnected (source timeout) after %v (sent: %d bytes, skipped: %d bytes)",
+				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped)
 			return
 		}
 
-		// Check how far behind we are BEFORE reading
-		// If we're too far behind, disconnect proactively to avoid blocking forever
+		// CHECK LAG ON EVERY READ (not just periodically)
 		writePos := buffer.WritePos()
 		currentLag := writePos - readPos
+
+		// Hard lag limit - disconnect if too slow
 		if currentLag > maxLagBytes {
 			h.logger.Printf("WARNING: Listener %s disconnected (too slow) - lag %d bytes exceeds max %d bytes after %v",
 				listener.ID, currentLag, maxLagBytes, time.Since(startTime).Round(time.Second))
 			return
 		}
 
-		// SOFT LAG RECOVERY: Skip to live edge if lag is accumulating
-		// This prevents unbounded lag accumulation over long listening sessions (24h+)
-		// Only check periodically to avoid overhead
-		if iterationCount%lagCheckInterval == 0 && currentLag > softLagBytes {
-			// Find MP3 sync point near live edge for clean audio
-			newPos := writePos - int64(defaultBurstSize) // Start slightly behind live
+		// Soft lag recovery - skip to live if accumulating too much lag
+		if currentLag > softLagBytes {
+			// Find MP3 sync point near live edge
+			newPos := writePos - int64(defaultBurstSize)
 			if newPos < 0 {
 				newPos = 0
 			}
 
-			// Try to find MP3 frame boundary for clean skip
-			// Read a small chunk to find sync point
-			syncBuf := make([]byte, 4096)
-			n, syncPos := buffer.ReadFromInto(newPos, syncBuf)
-			if n > 4 {
-				if offset := findMP3Sync(syncBuf[:n]); offset > 0 && offset < n-4 {
-					newPos = syncPos - int64(n) + int64(offset)
-				}
-			}
+			// Find MP3 frame boundary
+			newPos = buffer.FindMP3SyncFrom(newPos)
 
 			skippedBytes := newPos - readPos
 			if skippedBytes > 0 {
 				skipToLiveCount++
 				h.logger.Printf("INFO: Listener %s skip-to-live recovery #%d: skipped %.1f seconds (lag was %.1f sec, now ~%.1f sec)",
 					listener.ID, skipToLiveCount,
-					float64(skippedBytes)/40000.0, // bytes to seconds at 320kbps
+					float64(skippedBytes)/40000.0,
 					float64(currentLag)/40000.0,
 					float64(writePos-newPos)/40000.0)
 				readPos = newPos
 				totalSkipped += skippedBytes
 
-				// Reset ICY metadata state after skip to prevent protocol desync
-				// The next metadata block will be sent at the correct interval
+				// Reset ICY metadata state after skip
 				metaByteCount = 0
 			}
 		}
 
-		// Read data from buffer using SafeReadFromInto to detect skipped bytes
+		// Read data from buffer
 		n, newPos, skipped := buffer.SafeReadFromInto(readPos, readBuf)
 		if skipped > 0 {
 			totalSkipped += skipped
-			h.logger.Printf("WARNING: Listener %s skipped %d bytes at iteration %d (readPos: %d, writePos: %d, lag: %d, bufSize: %d, total skipped: %d)",
-				listener.ID, skipped, iterationCount, readPos, writePos, currentLag, buffer.Size(), totalSkipped)
+			h.logger.Printf("WARNING: Listener %s skipped %d bytes (readPos: %d, writePos: %d, lag: %d, bufSize: %d, total skipped: %d)",
+				listener.ID, skipped, readPos, writePos, currentLag, buffer.Size(), totalSkipped)
 		}
 
 		if n == 0 {
-			// No data available - tiny sleep to prevent CPU spin, then continue
-			// 1ms is fast enough for audio (320kbps = 40 bytes/ms)
-			time.Sleep(time.Millisecond)
+			// No data available - WAIT FOR DATA using sync.Cond (NOT polling!)
+			// This is the key fix: we block efficiently until data arrives
+			if !buffer.WaitForDataContext(ctx, readPos) {
+				// Context cancelled or listener done
+				h.logger.Printf("INFO: Listener %s disconnected (wait cancelled) after %v (sent: %d bytes, skipped: %d bytes)",
+					listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped)
+				return
+			}
 			continue
 		}
 
 		data := readBuf[:n]
 		readPos = newPos
 
-		// Write data through StreamWriter (handles flushing automatically)
+		// Write data through StreamWriter
 		var err error
 		if metaInterval > 0 {
-			err = writeDataWithMetaSW(sw, data, mount, &metaByteCount, &lastMeta, metaInterval)
+			err = writeDataWithMetaPooled(sw, data, mount, &metaByteCount, &lastMeta, metaInterval, metaBufPtr)
 		} else {
 			_, err = sw.Write(data)
 		}
 
 		if err != nil {
-			h.logger.Printf("INFO: Listener %s disconnected after %v (sent: %d bytes, skipped: %d bytes, skip-to-live: %d, iterations: %d)",
-				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, skipToLiveCount, iterationCount)
+			h.logger.Printf("INFO: Listener %s disconnected after %v (sent: %d bytes, skipped: %d bytes, skip-to-live: %d)",
+				listener.ID, time.Since(startTime).Round(time.Second), sw.BytesWritten(), totalSkipped, skipToLiveCount)
 			return
 		}
 
 		atomic.AddInt64(&listener.BytesSent, int64(len(data)))
-		// StreamWriter already flushes after each write
 	}
 }
 
 // waitForSource waits for a source to connect, returns false if we should give up
-func (h *ListenerHandler) waitForSource(mount *stream.Mount, listener *stream.Listener) bool {
+func (h *ListenerHandler) waitForSource(ctx context.Context, mount *stream.Mount, listener *stream.Listener) bool {
 	waitStart := time.Now()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
 	for !mount.IsActive() {
 		if time.Since(waitStart) > sourceReconnectWait {
 			return false
 		}
 		select {
+		case <-ctx.Done():
+			return false
 		case <-listener.Done():
 			return false
-		case <-time.After(100 * time.Millisecond):
+		case <-ticker.C:
+			// Check again
 		}
 	}
 	return true
@@ -625,23 +607,30 @@ func writeDataWithMeta(w io.Writer, data []byte, mount *stream.Mount, byteCount 
 			return err
 		}
 		*byteCount += n
-		remaining = remaining[n:] // Use actual bytes written, not requested
+		remaining = remaining[n:]
 	}
 
 	return nil
 }
 
-// writeDataWithMetaSW writes data with ICY metadata using StreamWriter
-// OPTIMIZED: Batches all data and metadata into a single write to reduce flush overhead
-func writeDataWithMetaSW(sw *StreamWriter, data []byte, mount *stream.Mount, byteCount *int, lastMeta *string, interval int) error {
+// writeDataWithMetaPooled writes data with ICY metadata using a pooled buffer
+// This reduces allocations compared to creating a new buffer each time
+func writeDataWithMetaPooled(sw *StreamWriter, data []byte, mount *stream.Mount, byteCount *int, lastMeta *string, interval int, bufPtr *[]byte) error {
 	if len(data) == 0 {
 		return nil
 	}
 
-	// Pre-calculate how much output we'll need (worst case: metadata block every 16KB)
-	// Max metadata block size is 1 + 16*16 = 257 bytes
+	// Calculate output size and resize pooled buffer if needed
 	numMetaBlocks := (len(data) / interval) + 2
-	outputBuf := make([]byte, 0, len(data)+numMetaBlocks*260)
+	requiredCap := len(data) + numMetaBlocks*260
+
+	// Get or grow the buffer
+	var outputBuf []byte
+	if bufPtr != nil && cap(*bufPtr) >= requiredCap {
+		outputBuf = (*bufPtr)[:0]
+	} else {
+		outputBuf = make([]byte, 0, requiredCap)
+	}
 
 	remaining := data
 
@@ -657,7 +646,7 @@ func writeDataWithMetaSW(sw *StreamWriter, data []byte, mount *stream.Mount, byt
 				outputBuf = appendMetaBlock(outputBuf, title)
 				*lastMeta = title
 			} else {
-				// Empty metadata block (just length byte = 0)
+				// Empty metadata block
 				outputBuf = append(outputBuf, 0)
 			}
 			*byteCount = 0
@@ -675,9 +664,21 @@ func writeDataWithMetaSW(sw *StreamWriter, data []byte, mount *stream.Mount, byt
 		remaining = remaining[toWrite:]
 	}
 
-	// Single write + flush for all the batched data
+	// Single write for all batched data
 	_, err := sw.Write(outputBuf)
+
+	// Store back for reuse (if using pooled buffer)
+	if bufPtr != nil {
+		*bufPtr = outputBuf[:0]
+	}
+
 	return err
+}
+
+// writeDataWithMetaSW writes data with ICY metadata using StreamWriter
+// DEPRECATED: Use writeDataWithMetaPooled instead
+func writeDataWithMetaSW(sw *StreamWriter, data []byte, mount *stream.Mount, byteCount *int, lastMeta *string, interval int) error {
+	return writeDataWithMetaPooled(sw, data, mount, byteCount, lastMeta, interval, nil)
 }
 
 // appendMetaBlock appends an ICY metadata block to the buffer

@@ -137,9 +137,9 @@ func (s *ListenerStats) CalculateQualityScore() float64 {
 // ADAPTIVE LISTENER
 // ---------------------------------------------------------
 
-// AdaptiveListener wraps BroadcastListener with QoS awareness
+// AdaptiveListener wraps ListenerPosition with QoS awareness
 type AdaptiveListener struct {
-	*BroadcastListener
+	*ListenerPosition
 
 	// QoS
 	qosLevel  QoSLevel
@@ -166,7 +166,7 @@ type AdaptiveListener struct {
 }
 
 // NewAdaptiveListener creates a new QoS-aware listener
-func NewAdaptiveListener(base *BroadcastListener, level QoSLevel) *AdaptiveListener {
+func NewAdaptiveListener(base *ListenerPosition, level QoSLevel) *AdaptiveListener {
 	config, ok := DefaultQoSConfigs[level]
 	if !ok {
 		config = DefaultQoSConfigs[QoSMedium]
@@ -174,15 +174,15 @@ func NewAdaptiveListener(base *BroadcastListener, level QoSLevel) *AdaptiveListe
 	}
 
 	al := &AdaptiveListener{
-		BroadcastListener: base,
-		qosLevel:          level,
-		qosConfig:         config,
-		windowSize:        30, // 30 samples for averaging
-		bytesWindow:       make([]int64, 30),
-		timesWindow:       make([]time.Time, 30),
-		writeLatencies:    make([]time.Duration, 10),
-		adaptiveEnabled:   level == QoSAdaptive,
-		adaptInterval:     time.Second,
+		ListenerPosition: base,
+		qosLevel:         level,
+		qosConfig:        config,
+		windowSize:       30, // 30 samples for averaging
+		bytesWindow:      make([]int64, 30),
+		timesWindow:      make([]time.Time, 30),
+		writeLatencies:   make([]time.Duration, 10),
+		adaptiveEnabled:  level == QoSAdaptive,
+		adaptInterval:    time.Second,
 	}
 
 	al.stats.ConnectedAt = time.Now()
@@ -192,11 +192,17 @@ func NewAdaptiveListener(base *BroadcastListener, level QoSLevel) *AdaptiveListe
 }
 
 // Read reads data with QoS awareness
-func (al *AdaptiveListener) Read() []byte {
-	data := al.BroadcastListener.Read(al.qosConfig.ChunkSize)
+func (al *AdaptiveListener) Read(buf []byte) (int, bool) {
+	// Limit read size to QoS chunk size
+	maxRead := al.qosConfig.ChunkSize
+	if len(buf) > maxRead {
+		buf = buf[:maxRead]
+	}
 
-	if len(data) > 0 {
-		al.recordMetrics(len(data))
+	n, ok := al.ListenerPosition.Read(buf)
+
+	if n > 0 {
+		al.recordMetrics(n)
 	}
 
 	// Periodically adapt QoS level
@@ -204,7 +210,17 @@ func (al *AdaptiveListener) Read() []byte {
 		al.adapt()
 	}
 
-	return data
+	return n, ok
+}
+
+// GetLag returns the current lag in bytes
+func (al *AdaptiveListener) GetLag() int64 {
+	return al.ListenerPosition.GetLag()
+}
+
+// GetSkipCount returns the number of skip-to-live events
+func (al *AdaptiveListener) GetSkipCount() int32 {
+	return al.ListenerPosition.SkipCount.Load()
 }
 
 // recordMetrics updates statistics
@@ -272,7 +288,7 @@ func (al *AdaptiveListener) recordMetrics(bytesRead int) {
 	}
 
 	// Update skip count
-	al.stats.SkipCount = al.SkipCount
+	al.stats.SkipCount = al.GetSkipCount()
 }
 
 // adapt adjusts QoS level based on performance
@@ -364,8 +380,8 @@ func (al *AdaptiveListener) Config() QoSConfig {
 
 // AdaptiveStreamManager manages streams with QoS awareness
 type AdaptiveStreamManager struct {
-	broadcaster *Broadcaster
-	listeners   sync.Map // map[string]*AdaptiveListener
+	buffer    *Buffer
+	listeners sync.Map // map[string]*AdaptiveListener
 
 	// Global stats
 	totalListeners int32
@@ -385,8 +401,15 @@ type AdaptiveStreamManager struct {
 
 // NewAdaptiveStreamManager creates a new adaptive stream manager
 func NewAdaptiveStreamManager(bufSize, burstSize int, defaultQoS QoSLevel) *AdaptiveStreamManager {
+	if bufSize <= 0 {
+		bufSize = DefaultBufferSize
+	}
+	if burstSize <= 0 {
+		burstSize = DefaultBurstSize
+	}
+
 	asm := &AdaptiveStreamManager{
-		broadcaster: NewBroadcaster(bufSize, burstSize),
+		buffer:      NewBuffer(bufSize, burstSize),
 		defaultQoS:  defaultQoS,
 		autoAdapt:   defaultQoS == QoSAdaptive,
 		monitorDone: make(chan struct{}),
@@ -399,16 +422,17 @@ func NewAdaptiveStreamManager(bufSize, burstSize int, defaultQoS QoSLevel) *Adap
 	return asm
 }
 
-// Write writes data to all listeners
+// Write writes data to the buffer and notifies all listeners
 func (asm *AdaptiveStreamManager) Write(data []byte) (int, error) {
-	n, err := asm.broadcaster.Write(data)
+	n, err := asm.buffer.Write(data)
 	atomic.AddInt64(&asm.totalBytes, int64(n))
 	return n, err
 }
 
 // AddListener adds a new adaptive listener
 func (asm *AdaptiveStreamManager) AddListener(id string) *AdaptiveListener {
-	baseListener := asm.broadcaster.AddListener(id)
+	// Create the base listener position
+	baseListener := NewListenerPosition(id, asm.buffer)
 	adaptiveListener := NewAdaptiveListener(baseListener, asm.defaultQoS)
 
 	asm.listeners.Store(id, adaptiveListener)
@@ -427,8 +451,8 @@ func (asm *AdaptiveStreamManager) AddListener(id string) *AdaptiveListener {
 
 // RemoveListener removes a listener
 func (asm *AdaptiveStreamManager) RemoveListener(id string) {
-	if _, ok := asm.listeners.LoadAndDelete(id); ok {
-		asm.broadcaster.RemoveListener(id)
+	if l, ok := asm.listeners.LoadAndDelete(id); ok {
+		l.(*AdaptiveListener).Close()
 		atomic.AddInt32(&asm.totalListeners, -1)
 	}
 }
@@ -486,14 +510,9 @@ func (asm *AdaptiveStreamManager) GlobalStats() (listeners, peak int, totalBytes
 	return
 }
 
-// Buffer returns the underlying broadcast buffer
-func (asm *AdaptiveStreamManager) Buffer() *BroadcastBuffer {
-	return asm.broadcaster.Buffer()
-}
-
-// Notify returns the notification channel
-func (asm *AdaptiveStreamManager) Notify() <-chan struct{} {
-	return asm.broadcaster.Notify()
+// Buffer returns the underlying buffer
+func (asm *AdaptiveStreamManager) Buffer() *Buffer {
+	return asm.buffer
 }
 
 // SetDefaultQoS sets the default QoS for new listeners
@@ -508,7 +527,12 @@ func (asm *AdaptiveStreamManager) SetDefaultQoS(level QoSLevel) {
 func (asm *AdaptiveStreamManager) Close() {
 	close(asm.monitorDone)
 	asm.monitorTicker.Stop()
-	asm.broadcaster.Close()
+
+	// Close all listeners
+	asm.listeners.Range(func(key, value interface{}) bool {
+		value.(*AdaptiveListener).Close()
+		return true
+	})
 }
 
 // ---------------------------------------------------------

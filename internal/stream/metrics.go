@@ -598,10 +598,10 @@ type BenchmarkResult struct {
 	ReadLatencyAvg  time.Duration
 }
 
-// RunBufferBenchmark benchmarks the broadcast buffer
+// RunBufferBenchmark benchmarks the ring buffer
 func RunBufferBenchmark(bufSize, burstSize, dataSize, iterations int) *Benchmark {
 	bench := &Benchmark{
-		Name:       fmt.Sprintf("BroadcastBuffer-%d-%d", bufSize, dataSize),
+		Name:       fmt.Sprintf("Buffer-%d-%d", bufSize, dataSize),
 		Iterations: iterations,
 		Results:    make([]BenchmarkResult, iterations),
 	}
@@ -614,7 +614,7 @@ func RunBufferBenchmark(bufSize, burstSize, dataSize, iterations int) *Benchmark
 	startTotal := time.Now()
 
 	for iter := 0; iter < iterations; iter++ {
-		buffer := NewBroadcastBuffer(bufSize, burstSize)
+		buffer := NewBuffer(bufSize, burstSize)
 		result := BenchmarkResult{Iteration: iter}
 
 		// Benchmark writes
@@ -622,7 +622,7 @@ func RunBufferBenchmark(bufSize, burstSize, dataSize, iterations int) *Benchmark
 		ops := 0
 		var bytesWritten int64
 		for bytesWritten < int64(bufSize*2) {
-			n, _ := buffer.WriteBatch(data)
+			n, _ := buffer.Write(data)
 			bytesWritten += int64(n)
 			ops++
 		}
@@ -632,16 +632,17 @@ func RunBufferBenchmark(bufSize, burstSize, dataSize, iterations int) *Benchmark
 		result.WriteThroughput = float64(bytesWritten) / result.WriteDuration.Seconds()
 		result.WriteLatencyAvg = result.WriteDuration / time.Duration(ops)
 
-		// Benchmark reads
-		listener := NewBroadcastListener("bench", buffer)
+		// Benchmark reads using ListenerPosition
+		listener := NewListenerPosition("bench", buffer)
+		readBuf := make([]byte, dataSize)
 		readStart := time.Now()
 		readOps := 0
 		var bytesRead int64
 		for bytesRead < bytesWritten/2 {
-			d := listener.Read(dataSize)
-			bytesRead += int64(len(d))
+			n, ok := listener.Read(readBuf)
+			bytesRead += int64(n)
 			readOps++
-			if len(d) == 0 {
+			if !ok || n == 0 {
 				break
 			}
 		}

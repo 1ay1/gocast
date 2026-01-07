@@ -1,48 +1,50 @@
-// Package stream tests for broadcast buffer and streaming components
+// Package stream tests for buffer and streaming components
 package stream
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
 )
 
 // ---------------------------------------------------------
-// BROADCAST BUFFER TESTS
+// BUFFER TESTS
 // ---------------------------------------------------------
 
-func TestNewBroadcastBuffer(t *testing.T) {
+func TestNewBuffer(t *testing.T) {
 	tests := []struct {
 		name      string
 		size      int
 		burstSize int
-		wantSize  int
+		wantMin   int
 	}{
-		{"default", 0, 0, 16384},
-		{"small", 1000, 100, 1024}, // rounds up to power of 2
+		{"default", 0, 0, 1024 * 1024}, // Default is 10MB, rounded to power of 2
+		{"small", 1000, 100, 1024},     // rounds up to power of 2
 		{"exact power of 2", 4096, 512, 4096},
 		{"large", 1024 * 1024, 8192, 1024 * 1024},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			buf := NewBroadcastBuffer(tt.size, tt.burstSize)
+			buf := NewBuffer(tt.size, tt.burstSize)
 			if buf == nil {
-				t.Fatal("NewBroadcastBuffer returned nil")
+				t.Fatal("NewBuffer returned nil")
 			}
-			if buf.size < tt.wantSize {
-				t.Errorf("buffer size = %d, want >= %d", buf.size, tt.wantSize)
+			if buf.Size() < tt.wantMin {
+				t.Errorf("buffer size = %d, want >= %d", buf.Size(), tt.wantMin)
 			}
 			// Verify power of 2
-			if buf.size&(buf.size-1) != 0 {
-				t.Errorf("buffer size %d is not a power of 2", buf.size)
+			size := buf.Size()
+			if size&(size-1) != 0 {
+				t.Errorf("buffer size %d is not a power of 2", size)
 			}
 		})
 	}
 }
 
-func TestBroadcastBufferWrite(t *testing.T) {
-	buf := NewBroadcastBuffer(1024, 256)
+func TestBufferWrite(t *testing.T) {
+	buf := NewBuffer(1024, 256)
 
 	data := []byte("Hello, World!")
 	n, err := buf.Write(data)
@@ -58,25 +60,8 @@ func TestBroadcastBufferWrite(t *testing.T) {
 	}
 }
 
-func TestBroadcastBufferWriteBatch(t *testing.T) {
-	buf := NewBroadcastBuffer(1024, 256)
-
-	data := make([]byte, 512)
-	for i := range data {
-		data[i] = byte(i % 256)
-	}
-
-	n, err := buf.WriteBatch(data)
-	if err != nil {
-		t.Fatalf("WriteBatch error: %v", err)
-	}
-	if n != len(data) {
-		t.Errorf("WriteBatch returned %d, want %d", n, len(data))
-	}
-}
-
-func TestBroadcastBufferWrapAround(t *testing.T) {
-	buf := NewBroadcastBuffer(256, 64)
+func TestBufferWrapAround(t *testing.T) {
+	buf := NewBuffer(256, 64)
 
 	// Write more than buffer size to test wrap-around
 	data := make([]byte, 100)
@@ -86,9 +71,9 @@ func TestBroadcastBufferWrapAround(t *testing.T) {
 
 	// Write 5 times (500 bytes) to wrap around multiple times
 	for i := 0; i < 5; i++ {
-		_, err := buf.WriteBatch(data)
+		_, err := buf.Write(data)
 		if err != nil {
-			t.Fatalf("WriteBatch error on iteration %d: %v", i, err)
+			t.Fatalf("Write error on iteration %d: %v", i, err)
 		}
 	}
 
@@ -97,63 +82,94 @@ func TestBroadcastBufferWrapAround(t *testing.T) {
 	}
 }
 
-func TestBroadcastBufferReadAt(t *testing.T) {
-	buf := NewBroadcastBuffer(1024, 256)
+func TestBufferReadFromInto(t *testing.T) {
+	buf := NewBuffer(1024, 256)
 
 	// Write test data
 	data := []byte("0123456789ABCDEF")
-	buf.WriteBatch(data)
+	buf.Write(data)
 
 	// Read from beginning
-	read, newPos := buf.ReadAt(0, 8)
-	if string(read) != "01234567" {
-		t.Errorf("ReadAt returned %q, want %q", string(read), "01234567")
+	readBuf := make([]byte, 8)
+	n, newPos := buf.ReadFromInto(0, readBuf)
+	if n != 8 {
+		t.Errorf("Read returned %d bytes, want 8", n)
+	}
+	if string(readBuf[:n]) != "01234567" {
+		t.Errorf("ReadFromInto returned %q, want %q", string(readBuf[:n]), "01234567")
 	}
 	if newPos != 8 {
 		t.Errorf("newPos = %d, want 8", newPos)
 	}
 
 	// Read remaining
-	read, newPos = buf.ReadAt(8, 100)
-	if string(read) != "89ABCDEF" {
-		t.Errorf("ReadAt returned %q, want %q", string(read), "89ABCDEF")
+	readBuf = make([]byte, 100)
+	n, newPos = buf.ReadFromInto(8, readBuf)
+	if string(readBuf[:n]) != "89ABCDEF" {
+		t.Errorf("ReadFromInto returned %q, want %q", string(readBuf[:n]), "89ABCDEF")
 	}
 	if newPos != 16 {
 		t.Errorf("newPos = %d, want 16", newPos)
 	}
 }
 
-func TestBroadcastBufferReadAtStale(t *testing.T) {
-	buf := NewBroadcastBuffer(256, 64) // Small buffer
+func TestBufferReadFromStale(t *testing.T) {
+	buf := NewBuffer(256, 64) // Small buffer
 
 	// Fill buffer beyond capacity
 	data := make([]byte, 300)
 	for i := range data {
 		data[i] = byte(i)
 	}
-	buf.WriteBatch(data)
+	buf.Write(data)
 
 	// Try to read from position 0 (should be stale)
-	read, newPos := buf.ReadAt(0, 100)
+	readBuf := make([]byte, 100)
+	n, newPos := buf.ReadFromInto(0, readBuf)
 
 	// Should skip to oldest available data
 	if newPos < 44 { // 300 - 256 = 44
 		t.Errorf("newPos = %d, should be >= 44", newPos)
 	}
-	if len(read) == 0 {
-		t.Error("ReadAt returned empty slice for stale position")
+	if n == 0 {
+		t.Error("ReadFromInto returned 0 bytes for stale position")
 	}
 }
 
-func TestBroadcastBufferGetBurst(t *testing.T) {
-	buf := NewBroadcastBuffer(1024, 64)
+func TestBufferSafeReadFromInto(t *testing.T) {
+	buf := NewBuffer(256, 64) // Small buffer
+
+	// Fill buffer beyond capacity
+	data := make([]byte, 300)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	buf.Write(data)
+
+	// Read from stale position - should report skipped bytes
+	readBuf := make([]byte, 100)
+	n, newPos, skipped := buf.SafeReadFromInto(0, readBuf)
+
+	if skipped == 0 {
+		t.Error("SafeReadFromInto should report skipped bytes")
+	}
+	if n == 0 {
+		t.Error("SafeReadFromInto returned 0 bytes")
+	}
+	if newPos <= 0 {
+		t.Error("newPos should be > 0")
+	}
+}
+
+func TestBufferGetBurst(t *testing.T) {
+	buf := NewBuffer(1024, 64)
 
 	// Write some data
 	data := make([]byte, 100)
 	for i := range data {
 		data[i] = byte(i)
 	}
-	buf.WriteBatch(data)
+	buf.Write(data)
 
 	burst := buf.GetBurst()
 	if len(burst) > 64 {
@@ -170,12 +186,12 @@ func TestBroadcastBufferGetBurst(t *testing.T) {
 	}
 }
 
-func TestBroadcastBufferSyncPoints(t *testing.T) {
-	buf := NewBroadcastBuffer(65536, 4096)
+func TestBufferSyncPoints(t *testing.T) {
+	buf := NewBuffer(65536, 4096)
 
 	// Write enough data to create sync points
 	data := make([]byte, 20000)
-	buf.WriteBatch(data)
+	buf.Write(data)
 
 	syncPos := buf.GetSyncPoint()
 	writePos := buf.WritePos()
@@ -186,17 +202,17 @@ func TestBroadcastBufferSyncPoints(t *testing.T) {
 	}
 
 	// Sync point should be within burst size of write position
-	if writePos-syncPos > int64(buf.burstSize) {
+	if writePos-syncPos > int64(buf.BurstSize()) {
 		t.Errorf("syncPos %d is too far behind writePos %d", syncPos, writePos)
 	}
 }
 
-func TestBroadcastBufferGetLivePosition(t *testing.T) {
-	buf := NewBroadcastBuffer(1024, 256)
+func TestBufferGetLivePosition(t *testing.T) {
+	buf := NewBuffer(1024, 256)
 
 	// Write data
 	data := make([]byte, 500)
-	buf.WriteBatch(data)
+	buf.Write(data)
 
 	livePos := buf.GetLivePosition()
 	writePos := buf.WritePos()
@@ -207,20 +223,127 @@ func TestBroadcastBufferGetLivePosition(t *testing.T) {
 	}
 }
 
+func TestBufferWaitForData(t *testing.T) {
+	buf := NewBuffer(1024, 256)
+
+	// Write initial data
+	buf.Write([]byte("initial"))
+	initialPos := buf.WritePos()
+
+	// Start a writer goroutine
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		buf.Write([]byte("more data"))
+	}()
+
+	// Wait for data - should return true when data arrives
+	result := buf.WaitForData(initialPos, 200*time.Millisecond)
+	if !result {
+		t.Error("WaitForData should return true when data is written")
+	}
+}
+
+func TestBufferWaitForDataTimeout(t *testing.T) {
+	buf := NewBuffer(1024, 256)
+
+	// Write initial data
+	buf.Write([]byte("initial"))
+	pos := buf.WritePos()
+
+	// Wait for more data that never comes - should timeout
+	start := time.Now()
+	result := buf.WaitForData(pos, 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if result {
+		t.Error("WaitForData should return false on timeout")
+	}
+	if elapsed < 40*time.Millisecond {
+		t.Errorf("WaitForData returned too quickly: %v", elapsed)
+	}
+}
+
+func TestBufferWaitForDataContext(t *testing.T) {
+	buf := NewBuffer(1024, 256)
+
+	// Write initial data
+	buf.Write([]byte("initial"))
+	initialPos := buf.WritePos()
+
+	// Create context that we'll cancel
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel after a short delay
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	// Wait for data with context - should return false when cancelled
+	result := buf.WaitForDataContext(ctx, initialPos)
+	if result {
+		t.Error("WaitForDataContext should return false when context is cancelled")
+	}
+}
+
+func TestBufferWaitForDataContextWithData(t *testing.T) {
+	buf := NewBuffer(1024, 256)
+
+	// Write initial data
+	buf.Write([]byte("initial"))
+	initialPos := buf.WritePos()
+
+	ctx := context.Background()
+
+	// Start a writer goroutine
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		buf.Write([]byte("more data"))
+	}()
+
+	// Wait for data with context - should return true when data arrives
+	result := buf.WaitForDataContext(ctx, initialPos)
+	if !result {
+		t.Error("WaitForDataContext should return true when data is written")
+	}
+}
+
+func TestBufferWaitForDataChan(t *testing.T) {
+	buf := NewBuffer(1024, 256)
+
+	// Write initial data
+	buf.Write([]byte("initial"))
+	initialPos := buf.WritePos()
+
+	done := make(chan struct{})
+
+	// Close done channel after a short delay
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(done)
+	}()
+
+	// Wait for data - should return false when done is closed
+	result := buf.WaitForDataChan(initialPos, done)
+	if result {
+		t.Error("WaitForDataChan should return false when done channel is closed")
+	}
+}
+
 // ---------------------------------------------------------
-// BROADCAST LISTENER TESTS
+// LISTENER POSITION TESTS
 // ---------------------------------------------------------
 
-func TestNewBroadcastListener(t *testing.T) {
-	buf := NewBroadcastBuffer(1024, 256)
+func TestNewListenerPosition(t *testing.T) {
+	buf := NewBuffer(1024, 256)
 
 	// Write some data first
 	data := make([]byte, 500)
-	buf.WriteBatch(data)
+	buf.Write(data)
 
-	listener := NewBroadcastListener("test-1", buf)
+	listener := NewListenerPosition("test-1", buf)
 	if listener == nil {
-		t.Fatal("NewBroadcastListener returned nil")
+		t.Fatal("NewListenerPosition returned nil")
 	}
 	if listener.ID != "test-1" {
 		t.Errorf("listener ID = %q, want %q", listener.ID, "test-1")
@@ -233,49 +356,45 @@ func TestNewBroadcastListener(t *testing.T) {
 	}
 }
 
-func TestBroadcastListenerRead(t *testing.T) {
-	buf := NewBroadcastBuffer(1024, 256)
+func TestListenerPositionRead(t *testing.T) {
+	buf := NewBuffer(1024, 256)
 
 	// Write identifiable data
 	data := []byte("ABCDEFGHIJ1234567890")
-	buf.WriteBatch(data)
+	buf.Write(data)
 
-	listener := NewBroadcastListener("test-1", buf)
+	listener := NewListenerPosition("test-1", buf)
 
 	// Read data
-	read := listener.Read(10)
-	if len(read) == 0 {
-		t.Error("Read returned empty slice")
+	readBuf := make([]byte, 10)
+	n, ok := listener.Read(readBuf)
+	if !ok {
+		t.Error("Read returned not ok")
 	}
-
-	// Verify we got valid data
-	for _, b := range read {
-		if b < 0x30 || (b > 0x39 && b < 0x41) || b > 0x5A {
-			if b != 0 { // Allow for initial position
-				// Character should be A-J or 0-9
-			}
-		}
+	if n == 0 {
+		t.Error("Read returned 0 bytes")
 	}
 }
 
-func TestBroadcastListenerSkipToLive(t *testing.T) {
-	buf := NewBroadcastBuffer(256, 64) // Small buffer
+func TestListenerPositionSkipToLive(t *testing.T) {
+	buf := NewBuffer(256, 64) // Small buffer
 
 	// Write initial data
 	initial := make([]byte, 100)
-	buf.WriteBatch(initial)
+	buf.Write(initial)
 
-	listener := NewBroadcastListener("test-1", buf)
+	listener := NewListenerPosition("test-1", buf)
 	startPos := listener.Position.Load()
 
 	// Write a lot more data (exceeds MaxListenerLag)
-	large := make([]byte, 50000)
-	buf.WriteBatch(large)
+	large := make([]byte, MaxListenerLag+10000)
+	buf.Write(large)
 
 	// Read should trigger skip-to-live
-	listener.Read(100)
+	readBuf := make([]byte, 100)
+	listener.Read(readBuf)
 
-	if listener.SkipCount == 0 {
+	if listener.SkipCount.Load() == 0 {
 		t.Error("expected skip count > 0 after falling behind")
 	}
 
@@ -285,14 +404,14 @@ func TestBroadcastListenerSkipToLive(t *testing.T) {
 	}
 }
 
-func TestBroadcastListenerGetLag(t *testing.T) {
-	buf := NewBroadcastBuffer(1024, 256)
+func TestListenerPositionGetLag(t *testing.T) {
+	buf := NewBuffer(1024, 256)
 
 	// Write data
 	data := make([]byte, 500)
-	buf.WriteBatch(data)
+	buf.Write(data)
 
-	listener := NewBroadcastListener("test-1", buf)
+	listener := NewListenerPosition("test-1", buf)
 
 	lag := listener.GetLag()
 	if lag < 0 {
@@ -300,13 +419,13 @@ func TestBroadcastListenerGetLag(t *testing.T) {
 	}
 }
 
-func TestBroadcastListenerIsHealthy(t *testing.T) {
-	buf := NewBroadcastBuffer(65536, 4096)
+func TestListenerPositionIsHealthy(t *testing.T) {
+	buf := NewBuffer(65536, 4096)
 
 	data := make([]byte, 1000)
-	buf.WriteBatch(data)
+	buf.Write(data)
 
-	listener := NewBroadcastListener("test-1", buf)
+	listener := NewListenerPosition("test-1", buf)
 
 	// Should be healthy initially
 	if !listener.IsHealthy() {
@@ -314,9 +433,9 @@ func TestBroadcastListenerIsHealthy(t *testing.T) {
 	}
 }
 
-func TestBroadcastListenerClose(t *testing.T) {
-	buf := NewBroadcastBuffer(1024, 256)
-	listener := NewBroadcastListener("test-1", buf)
+func TestListenerPositionClose(t *testing.T) {
+	buf := NewBuffer(1024, 256)
+	listener := NewListenerPosition("test-1", buf)
 
 	// Close should not panic
 	listener.Close()
@@ -344,8 +463,8 @@ func TestNewBroadcaster(t *testing.T) {
 	}
 	defer bc.Close()
 
-	if bc.ListenerCount() != 0 {
-		t.Errorf("initial listener count = %d, want 0", bc.ListenerCount())
+	if bc.Buffer() == nil {
+		t.Error("Buffer() returned nil")
 	}
 }
 
@@ -364,91 +483,116 @@ func TestBroadcasterWrite(t *testing.T) {
 	}
 }
 
-func TestBroadcasterAddRemoveListener(t *testing.T) {
+func TestBroadcasterClose(t *testing.T) {
 	bc := NewBroadcaster(1024, 256)
-	defer bc.Close()
 
-	// Add listeners
-	l1 := bc.AddListener("listener-1")
-	l2 := bc.AddListener("listener-2")
+	// Close should not panic
+	bc.Close()
 
-	if bc.ListenerCount() != 2 {
-		t.Errorf("listener count = %d, want 2", bc.ListenerCount())
-	}
+	// Double close should not panic
+	bc.Close()
 
-	if l1 == nil || l2 == nil {
-		t.Fatal("AddListener returned nil")
-	}
-
-	// Remove one
-	bc.RemoveListener("listener-1")
-
-	if bc.ListenerCount() != 1 {
-		t.Errorf("listener count = %d, want 1", bc.ListenerCount())
-	}
-
-	// Get remaining listener
-	got := bc.GetListener("listener-2")
-	if got == nil {
-		t.Error("GetListener returned nil for existing listener")
-	}
-
-	// Get removed listener
-	got = bc.GetListener("listener-1")
-	if got != nil {
-		t.Error("GetListener should return nil for removed listener")
+	// IsClosed should return true
+	if !bc.IsClosed() {
+		t.Error("IsClosed should return true after Close()")
 	}
 }
 
-func TestBroadcasterNotify(t *testing.T) {
-	bc := NewBroadcaster(1024, 256)
-	defer bc.Close()
-
-	// Write should trigger notification
-	bc.Write([]byte("test"))
-
-	select {
-	case <-bc.Notify():
-		// Good
-	case <-time.After(100 * time.Millisecond):
-		t.Error("expected notification after write")
-	}
-}
-
-func TestBroadcasterConcurrentListeners(t *testing.T) {
+func TestBroadcasterConcurrentWrites(t *testing.T) {
 	bc := NewBroadcaster(65536, 4096)
 	defer bc.Close()
 
-	// Write initial data
-	data := make([]byte, 1000)
+	var wg sync.WaitGroup
+	numWriters := 10
+	writesPerWriter := 100
+
+	data := make([]byte, 100)
 	for i := range data {
 		data[i] = byte(i % 256)
 	}
-	bc.Write(data)
 
-	// Add multiple listeners concurrently
-	var wg sync.WaitGroup
-	numListeners := 100
-
-	for i := 0; i < numListeners; i++ {
+	for i := 0; i < numWriters; i++ {
 		wg.Add(1)
-		go func(id int) {
+		go func() {
 			defer wg.Done()
-			listener := bc.AddListener(string(rune('A' + id)))
-			if listener != nil {
-				// Simulate reading
-				for j := 0; j < 10; j++ {
-					listener.Read(100)
-				}
+			for j := 0; j < writesPerWriter; j++ {
+				bc.Write(data)
 			}
-		}(i)
+		}()
 	}
 
 	wg.Wait()
 
-	if bc.ListenerCount() != numListeners {
-		t.Errorf("listener count = %d, want %d", bc.ListenerCount(), numListeners)
+	expectedBytes := int64(numWriters * writesPerWriter * len(data))
+	if bc.Buffer().BytesTotal() != expectedBytes {
+		t.Errorf("total bytes = %d, want %d", bc.Buffer().BytesTotal(), expectedBytes)
 	}
+}
+
+// ---------------------------------------------------------
+// BUFFER POOL TESTS
+// ---------------------------------------------------------
+
+func TestSmallBufferPool(t *testing.T) {
+	buf := GetSmallBuffer()
+	if buf == nil {
+		t.Fatal("GetSmallBuffer returned nil")
+	}
+	if len(*buf) != SmallBufferSize {
+		t.Errorf("buffer size = %d, want %d", len(*buf), SmallBufferSize)
+	}
+
+	// Modify buffer
+	(*buf)[0] = 42
+
+	// Return to pool
+	PutSmallBuffer(buf)
+
+	// Get another buffer
+	buf2 := GetSmallBuffer()
+	if buf2 == nil {
+		t.Fatal("GetSmallBuffer returned nil after put")
+	}
+
+	PutSmallBuffer(buf2)
+}
+
+func TestLargeBufferPool(t *testing.T) {
+	buf := GetLargeBuffer()
+	if buf == nil {
+		t.Fatal("GetLargeBuffer returned nil")
+	}
+	if len(*buf) != LargeBufferSize {
+		t.Errorf("buffer size = %d, want %d", len(*buf), LargeBufferSize)
+	}
+
+	PutLargeBuffer(buf)
+}
+
+func TestMetaBufferPool(t *testing.T) {
+	buf := GetMetaBuffer()
+	if buf == nil {
+		t.Fatal("GetMetaBuffer returned nil")
+	}
+	if cap(*buf) < MetaBufferSize {
+		t.Errorf("buffer capacity = %d, want >= %d", cap(*buf), MetaBufferSize)
+	}
+	if len(*buf) != 0 {
+		t.Errorf("buffer length = %d, want 0", len(*buf))
+	}
+
+	// Append some data
+	*buf = append(*buf, []byte("test")...)
+
+	PutMetaBuffer(buf)
+
+	// Get another buffer - should be reset
+	buf2 := GetMetaBuffer()
+	if len(*buf2) != 0 {
+		t.Errorf("reused buffer length = %d, want 0", len(*buf2))
+	}
+
+	PutMetaBuffer(buf2)
 }
 
 // ---------------------------------------------------------
@@ -514,6 +658,18 @@ func TestFindNextMP3Frame(t *testing.T) {
 	}
 }
 
+func TestValidateMP3Frame(t *testing.T) {
+	validFrame := []byte{0xFF, 0xFB, 0x90, 0x00}
+	if !ValidateMP3Frame(validFrame) {
+		t.Error("ValidateMP3Frame should return true for valid frame")
+	}
+
+	invalidFrame := []byte{0x00, 0x00, 0x00, 0x00}
+	if ValidateMP3Frame(invalidFrame) {
+		t.Error("ValidateMP3Frame should return false for invalid frame")
+	}
+}
+
 // ---------------------------------------------------------
 // JITTER BUFFER TESTS
 // ---------------------------------------------------------
@@ -539,18 +695,10 @@ func TestJitterBufferPushPop(t *testing.T) {
 		t.Errorf("Len() = %d, want 2", jb.Len())
 	}
 
-	// Pop should return nil if delay not reached
-	// (immediately after push)
-	popped := jb.Pop()
-	if popped != nil {
-		// This might succeed if the test runs slow enough
-		// which is fine
-	}
-
 	// Wait for delay
 	time.Sleep(15 * time.Millisecond)
 
-	popped = jb.Pop()
+	popped := jb.Pop()
 	if popped == nil {
 		t.Error("Pop returned nil after delay")
 	} else if string(popped) != "test1" {
@@ -558,57 +706,32 @@ func TestJitterBufferPushPop(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------
-// BYTE POOL TESTS
-// ---------------------------------------------------------
+func TestJitterBufferFlush(t *testing.T) {
+	jb := NewJitterBuffer(100 * time.Millisecond)
 
-func TestBytePool(t *testing.T) {
-	buf := GetPooledBuffer()
-	if buf == nil {
-		t.Fatal("GetPooledBuffer returned nil")
-	}
-	if len(*buf) != BytePoolSize {
-		t.Errorf("buffer size = %d, want %d", len(*buf), BytePoolSize)
+	jb.Push([]byte("test1"))
+	jb.Push([]byte("test2"))
+
+	flushed := jb.Flush()
+	if len(flushed) != 2 {
+		t.Errorf("Flush returned %d items, want 2", len(flushed))
 	}
 
-	// Modify buffer
-	(*buf)[0] = 42
-
-	// Return to pool
-	PutPooledBuffer(buf)
-
-	// Get another buffer
-	buf2 := GetPooledBuffer()
-	if buf2 == nil {
-		t.Fatal("GetPooledBuffer returned nil after put")
+	if jb.Len() != 0 {
+		t.Errorf("Len after flush = %d, want 0", jb.Len())
 	}
-
-	// Might be the same buffer (reused)
-	PutPooledBuffer(buf2)
 }
 
-// ---------------------------------------------------------
-// PADDED INT64 TESTS
-// ---------------------------------------------------------
+func TestJitterBufferReset(t *testing.T) {
+	jb := NewJitterBuffer(100 * time.Millisecond)
 
-func TestPaddedInt64(t *testing.T) {
-	var p PaddedInt64
+	jb.Push([]byte("test1"))
+	jb.Push([]byte("test2"))
 
-	if p.Load() != 0 {
-		t.Errorf("initial value = %d, want 0", p.Load())
-	}
+	jb.Reset()
 
-	p.Store(42)
-	if p.Load() != 42 {
-		t.Errorf("after store = %d, want 42", p.Load())
-	}
-
-	result := p.Add(8)
-	if result != 50 {
-		t.Errorf("Add result = %d, want 50", result)
-	}
-	if p.Load() != 50 {
-		t.Errorf("after add = %d, want 50", p.Load())
+	if jb.Len() != 0 {
+		t.Errorf("Len after reset = %d, want 0", jb.Len())
 	}
 }
 
@@ -616,8 +739,8 @@ func TestPaddedInt64(t *testing.T) {
 // BENCHMARKS
 // ---------------------------------------------------------
 
-func BenchmarkBroadcastBufferWrite(b *testing.B) {
-	buf := NewBroadcastBuffer(256*1024, 8192)
+func BenchmarkBufferWrite(b *testing.B) {
+	buf := NewBuffer(256*1024, 8192)
 	data := make([]byte, 4096)
 
 	b.ResetTimer()
@@ -628,52 +751,42 @@ func BenchmarkBroadcastBufferWrite(b *testing.B) {
 	}
 }
 
-func BenchmarkBroadcastBufferWriteBatch(b *testing.B) {
-	buf := NewBroadcastBuffer(256*1024, 8192)
-	data := make([]byte, 4096)
-
-	b.ResetTimer()
-	b.SetBytes(int64(len(data)))
-
-	for i := 0; i < b.N; i++ {
-		buf.WriteBatch(data)
-	}
-}
-
-func BenchmarkBroadcastBufferReadAt(b *testing.B) {
-	buf := NewBroadcastBuffer(256*1024, 8192)
+func BenchmarkBufferReadFromInto(b *testing.B) {
+	buf := NewBuffer(256*1024, 8192)
 
 	// Pre-fill buffer
 	data := make([]byte, 128*1024)
-	buf.WriteBatch(data)
+	buf.Write(data)
 
+	readBuf := make([]byte, 4096)
 	b.ResetTimer()
 	b.SetBytes(4096)
 
 	var pos int64
 	for i := 0; i < b.N; i++ {
-		_, pos = buf.ReadAt(pos, 4096)
+		_, pos = buf.ReadFromInto(pos, readBuf)
 		if pos >= buf.WritePos() {
 			pos = 0
 		}
 	}
 }
 
-func BenchmarkBroadcastListenerRead(b *testing.B) {
-	buf := NewBroadcastBuffer(256*1024, 8192)
+func BenchmarkListenerPositionRead(b *testing.B) {
+	buf := NewBuffer(256*1024, 8192)
 
 	// Pre-fill buffer
 	data := make([]byte, 128*1024)
-	buf.WriteBatch(data)
+	buf.Write(data)
 
-	listener := NewBroadcastListener("bench", buf)
+	listener := NewListenerPosition("bench", buf)
+	readBuf := make([]byte, 2048)
 
 	b.ResetTimer()
 	b.SetBytes(2048)
 
 	for i := 0; i < b.N; i++ {
-		d := listener.Read(2048)
-		if len(d) == 0 {
+		n, _ := listener.Read(readBuf)
+		if n == 0 {
 			// Reset position if we caught up
 			listener.Position.Store(0)
 		}
@@ -684,11 +797,6 @@ func BenchmarkBroadcasterWrite(b *testing.B) {
 	bc := NewBroadcaster(256*1024, 8192)
 	defer bc.Close()
 
-	// Add some listeners
-	for i := 0; i < 10; i++ {
-		bc.AddListener(string(rune('A' + i)))
-	}
-
 	data := make([]byte, 4096)
 
 	b.ResetTimer()
@@ -699,28 +807,27 @@ func BenchmarkBroadcasterWrite(b *testing.B) {
 	}
 }
 
-func BenchmarkBroadcasterConcurrent(b *testing.B) {
-	bc := NewBroadcaster(256*1024, 8192)
-	defer bc.Close()
-
+func BenchmarkBufferConcurrentReadWrite(b *testing.B) {
+	buf := NewBuffer(256*1024, 8192)
 	data := make([]byte, 1024)
 
 	// Pre-fill
-	bc.Write(make([]byte, 64*1024))
+	buf.Write(make([]byte, 64*1024))
 
-	// Add listeners that read concurrently
-	numListeners := 10
+	// Add readers that read concurrently
+	numReaders := 10
 	done := make(chan struct{})
 
-	for i := 0; i < numListeners; i++ {
-		listener := bc.AddListener(string(rune('A' + i)))
-		go func(l *BroadcastListener) {
+	for i := 0; i < numReaders; i++ {
+		listener := NewListenerPosition(string(rune('A'+i)), buf)
+		go func(lp *ListenerPosition) {
+			readBuf := make([]byte, 1024)
 			for {
 				select {
 				case <-done:
 					return
 				default:
-					l.Read(1024)
+					lp.Read(readBuf)
 				}
 			}
 		}(listener)
@@ -730,7 +837,7 @@ func BenchmarkBroadcasterConcurrent(b *testing.B) {
 	b.SetBytes(int64(len(data)))
 
 	for i := 0; i < b.N; i++ {
-		bc.Write(data)
+		buf.Write(data)
 	}
 
 	close(done)
@@ -747,22 +854,51 @@ func BenchmarkDetectMP3Frame(b *testing.B) {
 	}
 }
 
-func BenchmarkBytePool(b *testing.B) {
+func BenchmarkSmallBufferPool(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		buf := GetPooledBuffer()
-		PutPooledBuffer(buf)
+		buf := GetSmallBuffer()
+		PutSmallBuffer(buf)
 	}
 }
 
-func BenchmarkBytePoolParallel(b *testing.B) {
+func BenchmarkSmallBufferPoolParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			buf := GetPooledBuffer()
+			buf := GetSmallBuffer()
 			// Simulate some work
 			(*buf)[0] = 1
-			PutPooledBuffer(buf)
+			PutSmallBuffer(buf)
 		}
 	})
+}
+
+func BenchmarkWaitForData(b *testing.B) {
+	buf := NewBuffer(256*1024, 8192)
+
+	// Start a writer goroutine
+	done := make(chan struct{})
+	go func() {
+		data := make([]byte, 1024)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				buf.Write(data)
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+
+	b.ResetTimer()
+
+	pos := int64(0)
+	for i := 0; i < b.N; i++ {
+		buf.WaitForData(pos, 100*time.Millisecond)
+		pos = buf.WritePos()
+	}
+
+	close(done)
 }

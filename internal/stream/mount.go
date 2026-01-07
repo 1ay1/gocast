@@ -530,10 +530,10 @@ func (m *Mount) UpdateFromConfig(cfg *config.MountConfig) {
 	}
 }
 
-// Notify returns the notification channel for new data
-// Now delegated to buffer for more efficient notification
-func (m *Mount) Notify() <-chan struct{} {
-	return m.buffer.NotifyChan()
+// WaitForData waits for new data to be available in the buffer
+// This uses sync.Cond for efficient event-driven waiting
+func (m *Mount) WaitForData(pos int64, done <-chan struct{}) bool {
+	return m.buffer.WaitForDataChan(pos, done)
 }
 
 // Stats returns mount statistics

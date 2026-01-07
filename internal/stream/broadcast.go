@@ -1,5 +1,9 @@
 // Package stream provides state-of-the-art audio streaming primitives
-// This file implements a lock-free broadcast buffer with listener synchronization
+//
+// This file provides the Broadcaster which manages pushing data to listeners,
+// along with frame detection and utility functions.
+//
+// The main ring buffer implementation is in buffer.go.
 
 package stream
 
@@ -7,574 +11,91 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 )
 
-// ---------------------------------------------------------
+// =============================================================================
 // CONSTANTS
-// ---------------------------------------------------------
+// =============================================================================
 
 const (
-	// CacheLineSize for avoiding false sharing
-	CacheLineSize = 64
+	// DefaultBufferSize is 10MB - enough for ~4.3 minutes of 320kbps audio
+	DefaultBufferSize = 10 * 1024 * 1024
 
-	// DefaultBroadcastBufferSize is 1MB - enough for ~26 seconds of 320kbps audio
-	// This large buffer prevents any data loss even with slow listeners
-	DefaultBroadcastBufferSize = 1024 * 1024
+	// DefaultBurstSize is 128KB - ~3.2 seconds of 320kbps audio
+	DefaultBurstSize = 128 * 1024
 
 	// MaxListenerLag before forcing skip-to-live (512KB = ~13 seconds of 320kbps audio)
-	// Only skip if listener is EXTREMELY far behind - almost never in practice
 	MaxListenerLag = 512 * 1024
-
-	// MinChunkSize for frame-aligned writes
-	MinChunkSize = 417 // Typical MP3 frame size at 128kbps
 
 	// SyncPointInterval - create sync points every N bytes
 	SyncPointInterval = 16 * 1024
-
-	// BytePoolSize for zero-copy operations
-	BytePoolSize = 4096
 )
 
-// ---------------------------------------------------------
-// BYTE POOL - Reduces GC pressure
-// ---------------------------------------------------------
-
-var bytePool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, BytePoolSize)
-		return &buf
-	},
-}
-
-// GetPooledBuffer gets a buffer from the pool
-func GetPooledBuffer() *[]byte {
-	return bytePool.Get().(*[]byte)
-}
-
-// PutPooledBuffer returns a buffer to the pool
-func PutPooledBuffer(buf *[]byte) {
-	if buf != nil && cap(*buf) >= BytePoolSize {
-		*buf = (*buf)[:BytePoolSize]
-		bytePool.Put(buf)
-	}
-}
-
-// ---------------------------------------------------------
-// CACHE-LINE PADDED ATOMICS - Avoids false sharing
-// ---------------------------------------------------------
-
-// PaddedInt64 is a cache-line padded atomic int64
-type PaddedInt64 struct {
-	value int64
-	_     [CacheLineSize - 8]byte // Padding to fill cache line
-}
-
-// Load atomically loads the value
-func (p *PaddedInt64) Load() int64 {
-	return atomic.LoadInt64(&p.value)
-}
-
-// Store atomically stores the value
-func (p *PaddedInt64) Store(val int64) {
-	atomic.StoreInt64(&p.value, val)
-}
-
-// Add atomically adds to the value
-func (p *PaddedInt64) Add(delta int64) int64 {
-	return atomic.AddInt64(&p.value, delta)
-}
-
-// ---------------------------------------------------------
-// SYNC POINT - For clean listener joins
-// ---------------------------------------------------------
-
-// SyncPoint represents a position where listeners can cleanly join
-type SyncPoint struct {
-	Position  int64
-	Timestamp time.Time
-	FrameType byte // 0 = unknown, 1 = MP3 sync, 2 = AAC sync, 3 = silence
-}
-
-// ---------------------------------------------------------
-// BROADCAST BUFFER - Lock-free SPMC ring buffer
-// ---------------------------------------------------------
-
-// BroadcastBuffer is a lock-free single-producer, multiple-consumer ring buffer
-// optimized for audio streaming with listener synchronization
-type BroadcastBuffer struct {
-	// Data buffer (cache-line aligned)
-	data []byte
-	mask int64 // size - 1 for fast modulo via bitwise AND
-
-	// Write position (only modified by producer)
-	writePos PaddedInt64
-
-	// Sync points for clean listener joins
-	syncPoints    [16]SyncPoint // Circular buffer of recent sync points
-	syncPointHead int32
-	syncPointMu   sync.RWMutex
-
-	// Statistics
-	bytesWritten PaddedInt64
-	startTime    time.Time
-
-	// Configuration
-	size      int
-	burstSize int
-
-	// Frame detection state
-	lastFrameEnd int64
-	frameBuffer  []byte
-}
-
-// NewBroadcastBuffer creates a new lock-free broadcast buffer
-// Size must be a power of 2 for efficient modulo operations
-func NewBroadcastBuffer(size, burstSize int) *BroadcastBuffer {
-	// Round up to power of 2
-	size = nextPowerOf2(size)
-	if size < 16384 {
-		size = 16384 // Minimum 16KB
-	}
-
-	if burstSize <= 0 {
-		burstSize = 8192 // 8KB default burst
-	}
-	if burstSize > size/4 {
-		burstSize = size / 4
-	}
-
-	return &BroadcastBuffer{
-		data:        make([]byte, size),
-		mask:        int64(size - 1),
-		size:        size,
-		burstSize:   burstSize,
-		startTime:   time.Now(),
-		frameBuffer: make([]byte, 0, 4096),
-	}
-}
-
-// nextPowerOf2 returns the next power of 2 >= n
-func nextPowerOf2(n int) int {
-	if n <= 0 {
-		return 1
-	}
-	n--
-	n |= n >> 1
-	n |= n >> 2
-	n |= n >> 4
-	n |= n >> 8
-	n |= n >> 16
-	n++
-	return n
-}
-
-// Write writes data to the buffer (producer only - not thread safe for multiple writers)
-// Returns bytes written
-func (b *BroadcastBuffer) Write(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-
-	writePos := b.writePos.Load()
-	n := len(p)
-
-	// Check for sync point (frame boundary detection)
-	if b.shouldCreateSyncPoint(writePos, p) {
-		b.addSyncPoint(writePos)
-	}
-
-	// Write to ring buffer using bitwise AND for fast modulo
-	for i := 0; i < n; i++ {
-		b.data[(writePos+int64(i))&b.mask] = p[i]
-	}
-
-	// Memory barrier + atomic update
-	b.writePos.Add(int64(n))
-	b.bytesWritten.Add(int64(n))
-
-	return n, nil
-}
-
-// WriteBatch writes data in a cache-friendly batch operation
-func (b *BroadcastBuffer) WriteBatch(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-
-	writePos := b.writePos.Load()
-	n := len(p)
-
-	// Check for sync point
-	if b.shouldCreateSyncPoint(writePos, p) {
-		b.addSyncPoint(writePos)
-	}
-
-	// Calculate positions using bitwise AND
-	startIdx := writePos & b.mask
-	endIdx := (writePos + int64(n)) & b.mask
-
-	if startIdx < endIdx || endIdx == 0 {
-		// No wrap - single copy
-		copy(b.data[startIdx:], p)
-	} else {
-		// Wrap around - two copies
-		firstPart := int64(b.size) - startIdx
-		copy(b.data[startIdx:], p[:firstPart])
-		copy(b.data[0:], p[firstPart:])
-	}
-
-	b.writePos.Add(int64(n))
-	b.bytesWritten.Add(int64(n))
-
-	return n, nil
-}
-
-// shouldCreateSyncPoint detects if we should mark a sync point
-func (b *BroadcastBuffer) shouldCreateSyncPoint(pos int64, data []byte) bool {
-	// Create sync points at regular intervals
-	prevInterval := (pos / SyncPointInterval)
-	nextInterval := ((pos + int64(len(data))) / SyncPointInterval)
-
-	if nextInterval > prevInterval {
-		return true
-	}
-
-	// Also detect MP3 frame sync (0xFF 0xFB, 0xFF 0xFA, 0xFF 0xF3, 0xFF 0xF2)
-	if len(data) >= 2 {
-		if data[0] == 0xFF && (data[1]&0xE0) == 0xE0 {
-			return true
-		}
-	}
-
-	return false
-}
-
-// addSyncPoint adds a new sync point
-func (b *BroadcastBuffer) addSyncPoint(pos int64) {
-	b.syncPointMu.Lock()
-	defer b.syncPointMu.Unlock()
-
-	idx := atomic.AddInt32(&b.syncPointHead, 1) % int32(len(b.syncPoints))
-	b.syncPoints[idx] = SyncPoint{
-		Position:  pos,
-		Timestamp: time.Now(),
-		FrameType: 1, // MP3
-	}
-}
-
-// GetSyncPoint returns the best sync point for a new listener
-func (b *BroadcastBuffer) GetSyncPoint() int64 {
-	writePos := b.writePos.Load()
-
-	b.syncPointMu.RLock()
-	defer b.syncPointMu.RUnlock()
-
-	// Find the most recent sync point that's not too far behind
-	bestPos := writePos - int64(b.burstSize)
-	if bestPos < 0 {
-		bestPos = 0
-	}
-
-	for i := range b.syncPoints {
-		sp := b.syncPoints[i]
-		if sp.Position > bestPos && sp.Position < writePos {
-			if sp.Position > bestPos {
-				bestPos = sp.Position
-			}
-		}
-	}
-
-	return bestPos
-}
-
-// ---------------------------------------------------------
-// READER METHODS
-// ---------------------------------------------------------
-
-// WritePos returns the current write position
-func (b *BroadcastBuffer) WritePos() int64 {
-	return b.writePos.Load()
-}
-
-// ReadAt reads data at a specific position (lock-free)
-// Returns data read and new position
-func (b *BroadcastBuffer) ReadAt(pos int64, maxBytes int) ([]byte, int64) {
-	writePos := b.writePos.Load()
-
-	// No data available
-	if pos >= writePos {
-		return nil, pos
-	}
-
-	// Check if position is too old (data overwritten)
-	oldestPos := writePos - int64(b.size)
-	if oldestPos < 0 {
-		oldestPos = 0
-	}
-	if pos < oldestPos {
-		// Skip to oldest available data
-		pos = oldestPos
-	}
-
-	// Calculate available bytes
-	available := int(writePos - pos)
-	if available > maxBytes {
-		available = maxBytes
-	}
-	if available <= 0 {
-		return nil, pos
-	}
-
-	// Allocate result buffer
-	result := make([]byte, available)
-
-	// Read using bitwise AND for fast modulo
-	startIdx := pos & b.mask
-	endIdx := (pos + int64(available)) & b.mask
-
-	if startIdx < endIdx || endIdx == 0 {
-		// No wrap - single copy
-		copy(result, b.data[startIdx:startIdx+int64(available)])
-	} else {
-		// Wrap around - two copies
-		firstPart := int64(b.size) - startIdx
-		copy(result[:firstPart], b.data[startIdx:])
-		copy(result[firstPart:], b.data[:available-int(firstPart)])
-	}
-
-	return result, pos + int64(available)
-}
-
-// GetLivePosition returns position for lowest latency listening
-func (b *BroadcastBuffer) GetLivePosition() int64 {
-	writePos := b.writePos.Load()
-
-	// Start very close to live edge (just 2KB behind)
-	pos := writePos - 2048
-	if pos < 0 {
-		pos = 0
-	}
-	return pos
-}
-
-// GetBurst returns burst data for new listeners
-func (b *BroadcastBuffer) GetBurst() []byte {
-	writePos := b.writePos.Load()
-
-	burstBytes := int64(b.burstSize)
-	if writePos < burstBytes {
-		burstBytes = writePos
-	}
-	if burstBytes <= 0 {
-		return nil
-	}
-
-	// Try to start at a sync point
-	startPos := b.GetSyncPoint()
-	actualBurst := writePos - startPos
-	if actualBurst > int64(b.burstSize) {
-		actualBurst = int64(b.burstSize)
-		startPos = writePos - actualBurst
-	}
-
-	result := make([]byte, actualBurst)
-
-	startIdx := startPos & b.mask
-	endIdx := (startPos + actualBurst) & b.mask
-
-	if startIdx < endIdx || endIdx == 0 {
-		copy(result, b.data[startIdx:startIdx+actualBurst])
-	} else {
-		firstPart := int64(b.size) - startIdx
-		copy(result[:firstPart], b.data[startIdx:])
-		copy(result[firstPart:], b.data[:actualBurst-firstPart])
-	}
-
-	return result
-}
-
-// ---------------------------------------------------------
-// LISTENER TRACKING
-// ---------------------------------------------------------
-
-// BroadcastListener represents a listener's position in the stream
-type BroadcastListener struct {
-	ID         string
-	Position   PaddedInt64
-	LastRead   int64 // Unix nano timestamp
-	BytesSent  int64
-	SkipCount  int32 // Times we've skipped to live
-	Connected  time.Time
-	buffer     *BroadcastBuffer
-	done       chan struct{}
-	skipToLive bool
-}
-
-// NewBroadcastListener creates a new listener attached to a buffer
-func NewBroadcastListener(id string, buf *BroadcastBuffer) *BroadcastListener {
-	l := &BroadcastListener{
-		ID:        id,
-		buffer:    buf,
-		Connected: time.Now(),
-		done:      make(chan struct{}),
-	}
-
-	// Start at a sync point for clean audio
-	l.Position.Store(buf.GetSyncPoint())
-
-	return l
-}
-
-// Read reads available data for this listener
-// Automatically handles skip-to-live if listener falls too far behind
-func (l *BroadcastListener) Read(maxBytes int) []byte {
-	pos := l.Position.Load()
-	writePos := l.buffer.WritePos()
-
-	// Check if we're too far behind
-	lag := writePos - pos
-	if lag > MaxListenerLag {
-		// Skip to live edge at a sync point
-		newPos := l.buffer.GetSyncPoint()
-		l.Position.Store(newPos)
-		pos = newPos
-		atomic.AddInt32(&l.SkipCount, 1)
-	}
-
-	// Read data
-	data, newPos := l.buffer.ReadAt(pos, maxBytes)
-	if len(data) > 0 {
-		l.Position.Store(newPos)
-		l.LastRead = time.Now().UnixNano()
-		atomic.AddInt64(&l.BytesSent, int64(len(data)))
-	}
-
-	return data
-}
-
-// GetLag returns how far behind live edge this listener is
-func (l *BroadcastListener) GetLag() int64 {
-	return l.buffer.WritePos() - l.Position.Load()
-}
-
-// IsHealthy returns true if listener is keeping up
-func (l *BroadcastListener) IsHealthy() bool {
-	return l.GetLag() < MaxListenerLag/2
-}
-
-// Close closes the listener
-func (l *BroadcastListener) Close() {
-	select {
-	case <-l.done:
-	default:
-		close(l.done)
-	}
-}
-
-// Done returns the done channel
-func (l *BroadcastListener) Done() <-chan struct{} {
-	return l.done
-}
-
-// ---------------------------------------------------------
-// BROADCASTER - Pushes data to all listeners
-// ---------------------------------------------------------
-
-// Broadcaster manages pushing data to all listeners synchronously
+// =============================================================================
+// BROADCASTER - Manages pushing data to all listeners
+// =============================================================================
+
+// Broadcaster manages a buffer and its listeners
 type Broadcaster struct {
-	buffer    *BroadcastBuffer
-	listeners sync.Map // map[string]*BroadcastListener
-	count     int32
-
-	// Notify channel for new data
-	notify chan struct{}
-
-	// Control
-	done chan struct{}
-	wg   sync.WaitGroup
+	buffer *Buffer
+	done   chan struct{}
+	wg     sync.WaitGroup
 }
 
-// NewBroadcaster creates a new broadcaster
+// NewBroadcaster creates a new broadcaster with the specified buffer sizes
 func NewBroadcaster(bufSize, burstSize int) *Broadcaster {
+	if bufSize <= 0 {
+		bufSize = DefaultBufferSize
+	}
+	if burstSize <= 0 {
+		burstSize = DefaultBurstSize
+	}
+
 	return &Broadcaster{
-		buffer: NewBroadcastBuffer(bufSize, burstSize),
-		notify: make(chan struct{}, 1),
+		buffer: NewBuffer(bufSize, burstSize),
 		done:   make(chan struct{}),
 	}
 }
 
-// Write writes data and notifies listeners
+// Write writes data to the buffer and notifies all listeners
 func (bc *Broadcaster) Write(p []byte) (int, error) {
-	n, err := bc.buffer.WriteBatch(p)
-	if err != nil {
-		return n, err
-	}
-
-	// Non-blocking notify
-	select {
-	case bc.notify <- struct{}{}:
-	default:
-	}
-
-	return n, nil
-}
-
-// AddListener adds a new listener
-func (bc *Broadcaster) AddListener(id string) *BroadcastListener {
-	listener := NewBroadcastListener(id, bc.buffer)
-	bc.listeners.Store(id, listener)
-	atomic.AddInt32(&bc.count, 1)
-	return listener
-}
-
-// RemoveListener removes a listener
-func (bc *Broadcaster) RemoveListener(id string) {
-	if l, ok := bc.listeners.LoadAndDelete(id); ok {
-		l.(*BroadcastListener).Close()
-		atomic.AddInt32(&bc.count, -1)
-	}
-}
-
-// GetListener returns a listener by ID
-func (bc *Broadcaster) GetListener(id string) *BroadcastListener {
-	if l, ok := bc.listeners.Load(id); ok {
-		return l.(*BroadcastListener)
-	}
-	return nil
-}
-
-// ListenerCount returns number of active listeners
-func (bc *Broadcaster) ListenerCount() int {
-	return int(atomic.LoadInt32(&bc.count))
+	return bc.buffer.Write(p)
 }
 
 // Buffer returns the underlying buffer
-func (bc *Broadcaster) Buffer() *BroadcastBuffer {
+func (bc *Broadcaster) Buffer() *Buffer {
 	return bc.buffer
 }
 
-// Notify returns the notification channel
-func (bc *Broadcaster) Notify() <-chan struct{} {
-	return bc.notify
+// Done returns the done channel
+func (bc *Broadcaster) Done() <-chan struct{} {
+	return bc.done
 }
 
 // Close shuts down the broadcaster
 func (bc *Broadcaster) Close() {
-	close(bc.done)
-
-	// Close all listeners
-	bc.listeners.Range(func(key, value interface{}) bool {
-		value.(*BroadcastListener).Close()
-		return true
-	})
-
+	select {
+	case <-bc.done:
+		// Already closed
+	default:
+		close(bc.done)
+	}
 	bc.wg.Wait()
 }
 
-// ---------------------------------------------------------
-// FRAME DETECTOR - For clean audio boundaries
-// ---------------------------------------------------------
+// IsClosed returns true if the broadcaster is closed
+func (bc *Broadcaster) IsClosed() bool {
+	select {
+	case <-bc.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// =============================================================================
+// FRAME DETECTION - For clean audio boundaries
+// =============================================================================
 
 // FrameType represents audio frame types
 type FrameType int
@@ -614,23 +135,71 @@ func DetectMP3Frame(data []byte) int {
 	samplingIdx := (data[2] >> 2) & 0x03
 	padding := (data[2] >> 1) & 0x01
 
-	// Bitrate table for MPEG1 Layer 3
-	bitrates := []int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}
-	samplingRates := []int{44100, 48000, 32000, 0}
-
+	// Validate indices
 	if bitrateIdx == 0 || bitrateIdx == 15 || samplingIdx == 3 {
 		return 0
 	}
 
-	if version != 3 || layer != 1 { // MPEG1 Layer 3
+	// Bitrate and sampling rate tables
+	var bitrate, samplingRate int
+
+	switch version {
+	case 3: // MPEG1
+		switch layer {
+		case 1: // Layer 3
+			bitrates := []int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}
+			bitrate = bitrates[bitrateIdx] * 1000
+		case 2: // Layer 2
+			bitrates := []int{0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0}
+			bitrate = bitrates[bitrateIdx] * 1000
+		case 3: // Layer 1
+			bitrates := []int{0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0}
+			bitrate = bitrates[bitrateIdx] * 1000
+		default:
+			return 0
+		}
+		samplingRates := []int{44100, 48000, 32000, 0}
+		samplingRate = samplingRates[samplingIdx]
+	case 2: // MPEG2
+		switch layer {
+		case 1: // Layer 3
+			bitrates := []int{0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0}
+			bitrate = bitrates[bitrateIdx] * 1000
+		default:
+			return 0
+		}
+		samplingRates := []int{22050, 24000, 16000, 0}
+		samplingRate = samplingRates[samplingIdx]
+	case 0: // MPEG2.5
+		switch layer {
+		case 1: // Layer 3
+			bitrates := []int{0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0}
+			bitrate = bitrates[bitrateIdx] * 1000
+		default:
+			return 0
+		}
+		samplingRates := []int{11025, 12000, 8000, 0}
+		samplingRate = samplingRates[samplingIdx]
+	default:
 		return 0
 	}
 
-	bitrate := bitrates[bitrateIdx] * 1000
-	samplingRate := samplingRates[samplingIdx]
+	if bitrate == 0 || samplingRate == 0 {
+		return 0
+	}
 
-	// Frame size = 144 * bitrate / sampling_rate + padding
-	frameSize := (144 * bitrate / samplingRate) + int(padding)
+	// Calculate frame size based on layer
+	var frameSize int
+	switch layer {
+	case 3: // Layer 1
+		frameSize = (12*bitrate/samplingRate + int(padding)) * 4
+	case 2, 1: // Layer 2 or 3
+		if version == 3 { // MPEG1
+			frameSize = 144*bitrate/samplingRate + int(padding)
+		} else { // MPEG2 or MPEG2.5
+			frameSize = 72*bitrate/samplingRate + int(padding)
+		}
+	}
 
 	return frameSize
 }
@@ -649,13 +218,100 @@ func FindNextMP3Frame(data []byte) int {
 	return -1
 }
 
-// ---------------------------------------------------------
-// JITTER BUFFER - Smooths out network variations
-// ---------------------------------------------------------
+// ValidateMP3Frame checks if data starts with a valid MP3 frame
+func ValidateMP3Frame(data []byte) bool {
+	return DetectMP3Frame(data) > 0
+}
+
+// =============================================================================
+// LISTENER POSITION TRACKER - For tracking individual listener positions
+// =============================================================================
+
+// ListenerPosition tracks a listener's position in the buffer
+type ListenerPosition struct {
+	ID        string
+	Position  atomic.Int64
+	LastRead  atomic.Int64 // Unix nano timestamp
+	BytesSent atomic.Int64
+	SkipCount atomic.Int32
+	Connected time.Time
+	buffer    *Buffer
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// NewListenerPosition creates a new listener position tracker
+func NewListenerPosition(id string, buf *Buffer) *ListenerPosition {
+	lp := &ListenerPosition{
+		ID:        id,
+		buffer:    buf,
+		Connected: time.Now(),
+		done:      make(chan struct{}),
+	}
+
+	// Start at a sync point for clean audio
+	lp.Position.Store(buf.GetSyncPoint())
+
+	return lp
+}
+
+// Read reads available data for this listener into the provided buffer
+// Returns bytes read and whether data was available
+func (lp *ListenerPosition) Read(buf []byte) (int, bool) {
+	pos := lp.Position.Load()
+	writePos := lp.buffer.WritePos()
+
+	// Check if we're too far behind
+	lag := writePos - pos
+	if lag > MaxListenerLag {
+		// Skip to a sync point
+		newPos := lp.buffer.GetSyncPoint()
+		lp.Position.Store(newPos)
+		pos = newPos
+		lp.SkipCount.Add(1)
+	}
+
+	// Read data
+	n, newPos := lp.buffer.ReadFromInto(pos, buf)
+	if n > 0 {
+		lp.Position.Store(newPos)
+		lp.LastRead.Store(time.Now().UnixNano())
+		lp.BytesSent.Add(int64(n))
+		return n, true
+	}
+
+	return 0, false
+}
+
+// GetLag returns how far behind live edge this listener is
+func (lp *ListenerPosition) GetLag() int64 {
+	return lp.buffer.WritePos() - lp.Position.Load()
+}
+
+// IsHealthy returns true if listener is keeping up
+func (lp *ListenerPosition) IsHealthy() bool {
+	return lp.GetLag() < MaxListenerLag/2
+}
+
+// Close closes the listener position tracker
+func (lp *ListenerPosition) Close() {
+	lp.closeOnce.Do(func() {
+		close(lp.done)
+	})
+}
+
+// Done returns the done channel
+func (lp *ListenerPosition) Done() <-chan struct{} {
+	return lp.done
+}
+
+// =============================================================================
+// JITTER BUFFER - Smooths out network variations (optional use)
+// =============================================================================
 
 // JitterBuffer smooths out timing variations in data arrival
 type JitterBuffer struct {
-	target   time.Duration // Target buffering delay
+	target   time.Duration
 	minDelay time.Duration
 	maxDelay time.Duration
 
@@ -737,18 +393,31 @@ func (jb *JitterBuffer) Len() int {
 	return jb.size - jb.head + jb.tail
 }
 
-// ---------------------------------------------------------
-// UTILITIES
-// ---------------------------------------------------------
+// Flush returns all buffered data immediately
+func (jb *JitterBuffer) Flush() [][]byte {
+	jb.mu.Lock()
+	defer jb.mu.Unlock()
 
-// UnsafeString converts bytes to string without allocation
-// WARNING: The string is only valid while the byte slice is valid
-func UnsafeString(b []byte) string {
-	return *(*string)(unsafe.Pointer(&b))
+	var result [][]byte
+	for jb.head != jb.tail {
+		if jb.buffer[jb.head] != nil {
+			result = append(result, jb.buffer[jb.head])
+			jb.buffer[jb.head] = nil
+		}
+		jb.head = (jb.head + 1) % jb.size
+	}
+
+	return result
 }
 
-// UnsafeBytes converts string to bytes without allocation
-// WARNING: Do not modify the returned slice
-func UnsafeBytes(s string) []byte {
-	return unsafe.Slice(unsafe.StringData(s), len(s))
+// Reset clears the jitter buffer
+func (jb *JitterBuffer) Reset() {
+	jb.mu.Lock()
+	defer jb.mu.Unlock()
+
+	for i := range jb.buffer {
+		jb.buffer[i] = nil
+	}
+	jb.head = 0
+	jb.tail = 0
 }
