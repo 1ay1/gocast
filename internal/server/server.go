@@ -221,6 +221,7 @@ func NewWithSetupManager(dataDir string, logger *log.Logger) (*Server, error) {
 		sessionTokens:   make(map[string]time.Time),
 		logBuffer:       logBuffer,
 		activityBuffer:  activityBuffer,
+		statsCacheStop:  make(chan struct{}),
 	}
 
 	// Log server start
