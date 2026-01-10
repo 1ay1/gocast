@@ -841,7 +841,7 @@ type StatusHandler struct {
 
 // NewStatusHandler creates a new status handler
 func NewStatusHandler(mm *stream.MountManager, cfg *config.Config) *StatusHandler {
-	return &StatusHandler{mountManager: mm, config: cfg, startTime: time.Now(), version: "1.0.0"}
+	return &StatusHandler{mountManager: mm, config: cfg, startTime: time.Now(), version: Version}
 }
 
 // NewStatusHandlerWithInfo creates a new status handler with server info
