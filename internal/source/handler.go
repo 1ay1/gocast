@@ -485,6 +485,13 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 	var lastReadTime time.Time
 	var maxGapMs int64
 	var gapCount int
+	var lastGapLogTime time.Time
+
+	// Gap detection thresholds
+	// At 320kbps: ~7KB per 180ms, so gaps up to 300ms are normal
+	// Only warn about gaps > 500ms which indicate real source issues
+	const gapWarningThresholdMs = 500
+	const gapLogIntervalSeconds = 30 // Only log gap summary every 30 seconds
 
 	// Set a generous read deadline to detect dead connections
 	// We'll reset this after each successful read
@@ -529,6 +536,7 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 
 	// Now read directly from the connection - BULLETPROOF version
 	lastReadTime = time.Now()
+	lastGapLogTime = time.Now()
 	for mount.IsActive() {
 		// Reset read deadline before each read
 		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -543,15 +551,25 @@ func (h *Handler) streamFromConnection(conn net.Conn, bufReader *bufio.Reader, m
 			if gapMs > maxGapMs {
 				maxGapMs = gapMs
 			}
-			// Log significant gaps (>100ms could indicate source issues)
-			if gapMs > 100 {
+			// Count significant gaps (>500ms indicates real source issues)
+			if gapMs > gapWarningThresholdMs {
 				gapCount++
-				h.logger.Printf("WARNING: Source %s gap detected: %dms between reads (read #%d, %d bytes, total gaps: %d, max gap: %dms)",
-					mountPath, gapMs, readCount, n, gapCount, maxGapMs)
+				// Log immediately for very large gaps (>1s = definite problem)
+				if gapMs > 1000 {
+					h.logger.Printf("WARNING: Source %s large gap: %dms (total significant gaps: %d)",
+						mountPath, gapMs, gapCount)
+				}
 			}
 		}
 
-		if readCount <= 10 || readCount%1000 == 0 {
+		// Periodic gap summary (every 30 seconds if there were gaps)
+		if gapCount > 0 && now.Sub(lastGapLogTime).Seconds() > gapLogIntervalSeconds {
+			h.logger.Printf("INFO: Source %s gap summary: %d significant gaps (>%dms), max gap: %dms",
+				mountPath, gapCount, gapWarningThresholdMs, maxGapMs)
+			lastGapLogTime = now
+		}
+
+		if readCount <= 10 || readCount%5000 == 0 {
 			h.logger.Printf("DEBUG: Source %s direct read #%d: %d bytes, err=%v, maxGap=%dms, gapCount=%d",
 				mountPath, readCount, n, err, maxGapMs, gapCount)
 		}
