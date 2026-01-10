@@ -495,9 +495,25 @@ func (m *Mount) SetMetadata(title string) {
 	oldTitle := m.metadata.GetStreamTitle()
 	m.metadata.SetStreamTitle(title)
 
+	// Parse "Artist - Title" format to populate individual fields
+	var artist, trackTitle string
+	if idx := strings.Index(title, " - "); idx != -1 {
+		artist = strings.TrimSpace(title[:idx])
+		trackTitle = strings.TrimSpace(title[idx+3:])
+	} else {
+		// No separator found, use the whole string as title
+		trackTitle = title
+	}
+
+	// Update individual metadata fields
+	m.metadata.mu.Lock()
+	m.metadata.Artist = artist
+	m.metadata.Title = trackTitle
+	m.metadata.mu.Unlock()
+
 	// Record track change if title changed
 	if title != "" && title != oldTitle {
-		m.recordTrackChange(title, "", "")
+		m.recordTrackChange(title, artist, trackTitle)
 	}
 }
 
