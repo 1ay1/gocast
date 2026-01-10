@@ -50,8 +50,8 @@ const (
 
 	// softLagBytes: Soft threshold for skip-to-live recovery
 	// When lag exceeds this, we skip ahead to live edge instead of accumulating delay
-	// 512KB = ~13 seconds at 320kbps - noticeable but recoverable
-	softLagBytes = 524288
+	// 1.2MB = ~30 seconds at 320kbps - more tolerant of temporary slowdowns
+	softLagBytes = 1228800
 )
 
 // botUserAgents contains patterns for known bots/preview fetchers
