@@ -4,6 +4,7 @@ package stream
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,6 +77,17 @@ func (m *Metadata) Clone() *Metadata {
 		Public:      m.Public,
 	}
 }
+
+// TrackHistoryEntry represents a single track in the play history
+type TrackHistoryEntry struct {
+	Artist    string    `json:"artist"`
+	Title     string    `json:"title"`
+	Album     string    `json:"album,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// MaxTrackHistory is the maximum number of tracks to keep in history
+const MaxTrackHistory = 20
 
 // Listener represents a connected listener
 type Listener struct {
@@ -153,6 +165,11 @@ type Mount struct {
 	listenerMu          sync.RWMutex // Protects listeners map
 	configMu            sync.RWMutex // Protects Config
 	fallbackMount       string
+
+	// Track history - stores recent tracks played
+	trackHistory   []TrackHistoryEntry
+	trackHistoryMu sync.RWMutex
+	lastTrackKey   string // "artist|title" to detect track changes
 }
 
 // NewMount creates a new mount point
@@ -168,11 +185,12 @@ func NewMount(path string, cfg *config.MountConfig, bufferSize, burstSize int) *
 	}
 
 	return &Mount{
-		Path:      path,
-		Config:    cfg,
-		buffer:    NewBuffer(bufferSize, cfg.BurstSize),
-		metadata:  &Metadata{ContentType: cfg.Type},
-		listeners: make(map[string]*Listener),
+		Path:         path,
+		Config:       cfg,
+		buffer:       NewBuffer(bufferSize, cfg.BurstSize),
+		metadata:     &Metadata{ContentType: cfg.Type},
+		listeners:    make(map[string]*Listener),
+		trackHistory: make([]TrackHistoryEntry, 0, MaxTrackHistory),
 	}
 }
 
@@ -471,16 +489,27 @@ func (m *Mount) GetMetadata() *Metadata {
 	return m.metadata.Clone()
 }
 
-// SetMetadata updates the stream metadata
+// SetMetadata updates the stream metadata (stream title only)
+// This also records track changes in history
 func (m *Mount) SetMetadata(title string) {
+	oldTitle := m.metadata.GetStreamTitle()
 	m.metadata.SetStreamTitle(title)
+
+	// Record track change if title changed
+	if title != "" && title != oldTitle {
+		m.recordTrackChange(title, "", "")
+	}
 }
 
 // UpdateMetadata updates multiple metadata fields
+// This also records track changes in history when artist/title changes
 func (m *Mount) UpdateMetadata(meta *Metadata) {
-	m.metadata.mu.Lock()
-	defer m.metadata.mu.Unlock()
+	// Capture old values before update
+	oldArtist := m.metadata.Artist
+	oldTitle := m.metadata.Title
+	oldStreamTitle := m.metadata.StreamTitle
 
+	m.metadata.mu.Lock()
 	if meta.Title != "" {
 		m.metadata.Title = meta.Title
 	}
@@ -508,6 +537,113 @@ func (m *Mount) UpdateMetadata(meta *Metadata) {
 	if meta.ContentType != "" {
 		m.metadata.ContentType = meta.ContentType
 	}
+	if meta.Album != "" {
+		m.metadata.Album = meta.Album
+	}
+
+	// Get new values after update
+	newArtist := m.metadata.Artist
+	newTitle := m.metadata.Title
+	newStreamTitle := m.metadata.StreamTitle
+	newAlbum := m.metadata.Album
+	m.metadata.mu.Unlock()
+
+	// Check if track changed (by artist+title or stream_title)
+	trackChanged := false
+	if meta.Artist != "" || meta.Title != "" {
+		if newArtist != oldArtist || newTitle != oldTitle {
+			trackChanged = true
+		}
+	} else if meta.StreamTitle != "" && newStreamTitle != oldStreamTitle {
+		trackChanged = true
+	}
+
+	if trackChanged && (newArtist != "" || newTitle != "" || newStreamTitle != "") {
+		if newArtist != "" || newTitle != "" {
+			m.recordTrackChange(newStreamTitle, newArtist, newTitle)
+		} else {
+			m.recordTrackChange(newStreamTitle, "", "")
+		}
+		// Also update album if provided
+		if newAlbum != "" {
+			m.updateLastTrackAlbum(newAlbum)
+		}
+	}
+}
+
+// recordTrackChange adds a track to the history
+func (m *Mount) recordTrackChange(streamTitle, artist, title string) {
+	// Parse artist/title from streamTitle if not provided separately
+	if artist == "" && title == "" && streamTitle != "" {
+		// Try to parse "Artist - Title" format
+		parts := strings.SplitN(streamTitle, " - ", 2)
+		if len(parts) == 2 {
+			artist = strings.TrimSpace(parts[0])
+			title = strings.TrimSpace(parts[1])
+		} else {
+			title = streamTitle
+		}
+	}
+
+	// Create track key to avoid duplicates
+	trackKey := artist + "|" + title
+
+	m.trackHistoryMu.Lock()
+	defer m.trackHistoryMu.Unlock()
+
+	// Skip if same track as last one
+	if trackKey == m.lastTrackKey {
+		return
+	}
+	m.lastTrackKey = trackKey
+
+	// Create new entry
+	entry := TrackHistoryEntry{
+		Artist:    artist,
+		Title:     title,
+		StartedAt: time.Now(),
+	}
+
+	// Add to front of history (newest first)
+	m.trackHistory = append([]TrackHistoryEntry{entry}, m.trackHistory...)
+
+	// Trim to max size
+	if len(m.trackHistory) > MaxTrackHistory {
+		m.trackHistory = m.trackHistory[:MaxTrackHistory]
+	}
+}
+
+// updateLastTrackAlbum updates the album of the most recent track
+func (m *Mount) updateLastTrackAlbum(album string) {
+	m.trackHistoryMu.Lock()
+	defer m.trackHistoryMu.Unlock()
+
+	if len(m.trackHistory) > 0 {
+		m.trackHistory[0].Album = album
+	}
+}
+
+// GetHistory returns a copy of the track history (newest first)
+func (m *Mount) GetHistory() []TrackHistoryEntry {
+	m.trackHistoryMu.RLock()
+	defer m.trackHistoryMu.RUnlock()
+
+	if len(m.trackHistory) == 0 {
+		return nil
+	}
+
+	// Return a copy
+	result := make([]TrackHistoryEntry, len(m.trackHistory))
+	copy(result, m.trackHistory)
+	return result
+}
+
+// ClearHistory clears the track history (e.g., on source disconnect)
+func (m *Mount) ClearHistory() {
+	m.trackHistoryMu.Lock()
+	defer m.trackHistoryMu.Unlock()
+	m.trackHistory = m.trackHistory[:0]
+	m.lastTrackKey = ""
 }
 
 // Buffer returns the stream buffer
@@ -550,6 +686,9 @@ func (m *Mount) Stats() MountStats {
 	// Get sourceActive atomically (lock-free)
 	isActive := m.sourceActive.Load()
 
+	// Get track history
+	history := m.GetHistory()
+
 	// Now get mount-level data with brief lock
 	m.mu.RLock()
 	stats := MountStats{
@@ -564,6 +703,7 @@ func (m *Mount) Stats() MountStats {
 		PeakListeners:    peakListeners,
 		ContentType:      m.metadata.ContentType,
 		Metadata:         m.metadata.Clone(),
+		History:          history,
 	}
 	m.mu.RUnlock()
 
@@ -583,6 +723,7 @@ type MountStats struct {
 	PeakListeners    int
 	ContentType      string
 	Metadata         *Metadata
+	History          []TrackHistoryEntry // Recent track history
 }
 
 // MountManager manages all mount points

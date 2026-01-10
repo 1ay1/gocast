@@ -893,9 +893,22 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 	}
 
 	totalBytesSent := h.mountManager.TotalBytesSent()
+	totalListeners := h.mountManager.TotalListeners()
 
 	// Format start time as RFC3339 for frontend parsing
 	startedStr := h.startTime.Format(time.RFC3339)
+
+	// Build base URL for stream URLs
+	hostname := cfg.Server.Hostname
+	if hostname == "" || hostname == "localhost" {
+		hostname = "localhost"
+	}
+	port := cfg.Server.Port
+	scheme := "http"
+	if cfg.SSL.Enabled {
+		scheme = "https"
+		port = cfg.SSL.Port
+	}
 
 	// Top-level fields for frontend compatibility
 	sb.WriteString(`{"server_id":"`)
@@ -908,14 +921,20 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 	sb.WriteString(strconv.FormatInt(uptime, 10))
 	sb.WriteString(`,"total_bytes_sent":`)
 	sb.WriteString(strconv.FormatInt(totalBytesSent, 10))
+	sb.WriteString(`,"total_listeners":`)
+	sb.WriteString(strconv.Itoa(totalListeners))
 	sb.WriteString(`,"server":{"id":"`)
 	sb.WriteString(escapeJSON(serverID))
 	sb.WriteString(`","version":"`)
 	sb.WriteString(escapeJSON(h.version))
+	sb.WriteString(`","hostname":"`)
+	sb.WriteString(escapeJSON(hostname))
 	sb.WriteString(`","uptime":`)
 	sb.WriteString(strconv.FormatInt(uptime, 10))
 	sb.WriteString(`,"total_bytes_sent":`)
 	sb.WriteString(strconv.FormatInt(totalBytesSent, 10))
+	sb.WriteString(`,"total_listeners":`)
+	sb.WriteString(strconv.Itoa(totalListeners))
 	sb.WriteString(`},"mounts":[`)
 
 	first := true
@@ -930,8 +949,13 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 		}
 		first = false
 
+		// Build stream URL for this mount
+		streamURL := fmt.Sprintf("%s://%s:%d%s", scheme, hostname, port, stats.Path)
+
 		sb.WriteString(`{"path":"`)
 		sb.WriteString(escapeJSON(stats.Path))
+		sb.WriteString(`","stream_url":"`)
+		sb.WriteString(escapeJSON(streamURL))
 		sb.WriteString(`","active":`)
 		if stats.Active {
 			sb.WriteString("true")
@@ -948,6 +972,15 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 		sb.WriteString(escapeJSON(stats.ContentType))
 		sb.WriteString(`"`)
 
+		// Add stream start time if source is active
+		if stats.Active && !stats.StartTime.IsZero() {
+			streamDuration := int64(time.Since(stats.StartTime).Seconds())
+			sb.WriteString(`,"stream_start":"`)
+			sb.WriteString(stats.StartTime.Format(time.RFC3339))
+			sb.WriteString(`","stream_duration":`)
+			sb.WriteString(strconv.FormatInt(streamDuration, 10))
+		}
+
 		// Add name and bitrate from metadata
 		if stats.Metadata != nil {
 			sb.WriteString(`,"name":"`)
@@ -962,16 +995,49 @@ func (h *StatusHandler) serveJSON(w http.ResponseWriter) {
 			sb.WriteString(escapeJSON(stats.Metadata.Genre))
 			sb.WriteString(`","description":"`)
 			sb.WriteString(escapeJSON(stats.Metadata.Description))
-			sb.WriteString(`"`)
+			sb.WriteString(`","public":`)
+			if stats.Metadata.Public {
+				sb.WriteString("true")
+			} else {
+				sb.WriteString("false")
+			}
 
-			// Add metadata object with stream_title
+			// Add full metadata object for radio UI
 			sb.WriteString(`,"metadata":{"stream_title":"`)
 			sb.WriteString(escapeJSON(stats.Metadata.GetStreamTitle()))
 			sb.WriteString(`","artist":"`)
 			sb.WriteString(escapeJSON(stats.Metadata.Artist))
 			sb.WriteString(`","title":"`)
 			sb.WriteString(escapeJSON(stats.Metadata.Title))
+			sb.WriteString(`","album":"`)
+			sb.WriteString(escapeJSON(stats.Metadata.Album))
+			sb.WriteString(`","url":"`)
+			sb.WriteString(escapeJSON(stats.Metadata.URL))
 			sb.WriteString(`"}`)
+		}
+
+		// Add track history (last N tracks played)
+		if len(stats.History) > 0 {
+			sb.WriteString(`,"history":[`)
+			for i, track := range stats.History {
+				if i > 0 {
+					sb.WriteString(",")
+				}
+				sb.WriteString(`{"artist":"`)
+				sb.WriteString(escapeJSON(track.Artist))
+				sb.WriteString(`","title":"`)
+				sb.WriteString(escapeJSON(track.Title))
+				sb.WriteString(`"`)
+				if track.Album != "" {
+					sb.WriteString(`,"album":"`)
+					sb.WriteString(escapeJSON(track.Album))
+					sb.WriteString(`"`)
+				}
+				sb.WriteString(`,"started_at":"`)
+				sb.WriteString(track.StartedAt.Format(time.RFC3339))
+				sb.WriteString(`"}`)
+			}
+			sb.WriteString(`]`)
 		}
 
 		sb.WriteString(`}`)
